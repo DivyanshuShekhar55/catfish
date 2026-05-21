@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -108,6 +109,54 @@ func (p *Pool) Close() {
 	p.inner.Close()
 }
 
+// exec returns no rows, used for insert/delete/update ops
+// returns a command tag (like "DELETE 8" which means 8 rows were deleted)
+func (p *Pool) Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
+	conn, err := p.inner.Acquire(ctx)
+	if err != nil {
+		return pgconn.CommandTag{}, fmt.Errorf("catfish/pool: acquire: %w", err)
+	}
+	defer conn.Release()
+
+	cmdTag, err := conn.Exec(ctx, sql, args...)
+	if err != nil {
+		return pgconn.CommandTag{}, fmt.Errorf("catfish/pool: exec: %w", err)
+	}
+	return cmdTag, nil
+}
+
+// query is used for queries that return row(s)
+// caller must call rows.Close() when done reading required row(s)
+// but here is the problem with queries (not with exec):
+// we get a handler after conn.Query() is run, NOT the row(s)'s data itself
+// we return this rows handler to the user, it's upto the user to use the handler whenever he wishes (using rows.Next() loop)
+// we can't say conn.Release() in our function, cause the user might not have read the values yet
+// so we need a way to auto close the conenction once the user calls rows.Close() 
+// in short we need to create a func that closes both rows and conn with the calling of rows.Close()
+// this is just because by design we don't give users the feature to get individual conns, so they can't close it either
+
+func (p *Pool) Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error) {
+	conn, err := p.inner.Acquire(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("catfish/pool: acquire: %w", err)
+	}
+	// we do NOT write defer conn.Release() due to reason mentioned before
+	// rows is not the data, just a handler to get the data
+	rows, err := conn.Query(ctx, sql, args...)
+	if err != nil {
+		// if error call conn.Release()
+		conn.Release()
+		return nil, fmt.Errorf("catfish/pool: query: %w", err)
+	}
+
+	// clever part : (thanks to Claude) now we can hijack the real rows here
+	// pgx.Rows are interface so by defining a method on a struct same as pgx.Rows
+	// pgx thinks that struct is same as pgx.Rows, that struct is autoReleaseRows()
+	return &autoReleaseRows{Rows: rows, conn: conn}, nil
+	
+}
+
+
 // warm blocks until the pool has at least MinConns idle connections or ctx
 // is cancelled. It pings the pool on a tight loop — pgxpool establishes
 // connections in the background as soon as it is created.
@@ -176,5 +225,24 @@ func drainRows(ctx context.Context, conn *pgx.Conn, maxDrainRows int32) (bool, e
 	}
 
 	return true, nil
+
+}
+
+type autoReleaseRows struct {
+	pgx.Rows
+	conn *pgxpool.Conn
+	isClosedAlready bool
+}
+
+func (r *autoReleaseRows) Close(){
+	if r.isClosedAlready {
+		return
+	}
+
+	// not closed already and user called pgx.Rows.Close()
+	// instead of running the normal close, we overload the function with our own implementation
+	r.Rows.Close() // pgx drains remaining rows internally here
+	r.isClosedAlready = true
+	r.conn.Release() // return connection to pool - triggers AfterRelease
 
 }
