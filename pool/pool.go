@@ -171,6 +171,30 @@ func (p *Pool) QueryRow(ctx context.Context, sql string, args ...any) pgx.Row {
 	return &autoReleaseRow{Row: row, conn: conn}
 }
 
+// BeginTx starts a transaction with the given options.
+// The caller is responsible for calling tx.Commit() or tx.Rollback().
+// If neither is called (e.g. panic), AfterRelease will issue a ROLLBACK
+// automatically when the connection is returned to the pool.
+//
+// Example:
+// tx, err := pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
+// use this tx to run multiple queries, also remember to call defer.Rollback() or tx.Commit()
+func (p *Pool) BeginTx(ctx context.Context, opts pgx.TxOptions) (pgx.Tx, error) {
+	conn, err := p.inner.Acquire(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("catfish/pool: acquire: %w", err)
+	}
+
+	tx, err := conn.BeginTx(ctx, opts)
+	if err != nil {
+		conn.Release()
+		return nil, fmt.Errorf("catfish/pool: begin tx: %w", err)
+	}
+
+	// Wrap so we release the connection after commit or rollback.
+	return &autoReleaseTx{Tx: tx, conn: conn}, nil
+}
+
 // warm blocks until the pool has at least MinConns idle connections or ctx
 // is cancelled. It pings the pool on a tight loop — pgxpool establishes
 // connections in the background as soon as it is created.
@@ -284,3 +308,33 @@ type errRow struct {
 }
 
 func (r *errRow) Scan(...any) error { return r.err }
+
+// autoReleaseTx releases the pool connection after Commit or Rollback.
+// Calling Rollback after Commit is a safe no-op (matches pgx behaviour).
+type autoReleaseTx struct {
+	pgx.Tx
+	conn *pgxpool.Conn
+	done bool
+}
+
+// user called Commit after tx, release the connection
+func (t *autoReleaseTx) Commit(ctx context.Context) error {
+	if t.done {
+		return fmt.Errorf("pgkeeper/pool: tx already closed")
+	}
+	t.done = true
+	err := t.Tx.Commit(ctx)
+	t.conn.Release()
+	return err
+}
+
+func (t *autoReleaseTx) Rollback(ctx context.Context) error {
+	if t.done {
+		// Already committed or rolled back — safe no-op.
+		return nil
+	}
+	t.done = true
+	err := t.Tx.Rollback(ctx)
+	t.conn.Release()
+	return err
+}
