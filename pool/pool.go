@@ -131,7 +131,7 @@ func (p *Pool) Exec(ctx context.Context, sql string, args ...any) (pgconn.Comman
 // we get a handler after conn.Query() is run, NOT the row(s)'s data itself
 // we return this rows handler to the user, it's upto the user to use the handler whenever he wishes (using rows.Next() loop)
 // we can't say conn.Release() in our function, cause the user might not have read the values yet
-// so we need a way to auto close the conenction once the user calls rows.Close() 
+// so we need a way to auto close the conenction once the user calls rows.Close()
 // in short we need to create a func that closes both rows and conn with the calling of rows.Close()
 // this is just because by design we don't give users the feature to get individual conns, so they can't close it either
 
@@ -153,9 +153,23 @@ func (p *Pool) Query(ctx context.Context, sql string, args ...any) (pgx.Rows, er
 	// pgx.Rows are interface so by defining a method on a struct same as pgx.Rows
 	// pgx thinks that struct is same as pgx.Rows, that struct is autoReleaseRows()
 	return &autoReleaseRows{Rows: rows, conn: conn}, nil
-	
+
 }
 
+// query row reads just a single row
+// if no row found returns an error on calling .Scan() on the row handler
+// just like we released the connection only after rows.Close() was called
+// we release the connection after row.Scan() will be called on the returned row handler
+func (p *Pool) QueryRow(ctx context.Context, sql string, args ...any) pgx.Row {
+	conn, err := p.inner.Acquire(ctx)
+	if err != nil {
+		// pgx.Row surfaces the error on .Scan(), so wrap it there
+		return &errRow{err: fmt.Errorf("catfish/pool: acquire: %w", err)}
+	}
+
+	row := conn.QueryRow(ctx, sql, args...)
+	return &autoReleaseRow{Row: row, conn: conn}
+}
 
 // warm blocks until the pool has at least MinConns idle connections or ctx
 // is cancelled. It pings the pool on a tight loop — pgxpool establishes
@@ -228,13 +242,14 @@ func drainRows(ctx context.Context, conn *pgx.Conn, maxDrainRows int32) (bool, e
 
 }
 
+// read why we need it in the explaination on .Query() method
 type autoReleaseRows struct {
 	pgx.Rows
-	conn *pgxpool.Conn
+	conn            *pgxpool.Conn
 	isClosedAlready bool
 }
 
-func (r *autoReleaseRows) Close(){
+func (r *autoReleaseRows) Close() {
 	if r.isClosedAlready {
 		return
 	}
@@ -243,6 +258,29 @@ func (r *autoReleaseRows) Close(){
 	// instead of running the normal close, we overload the function with our own implementation
 	r.Rows.Close() // pgx drains remaining rows internally here
 	r.isClosedAlready = true
-	r.conn.Release() // return connection to pool - triggers AfterRelease
+	r.conn.Release() // return connection to pool, also triggers AfterRelease()
 
 }
+
+// autoReleaseRow releases the pool connection after Scan() is called
+// pgx.Row reads exactly one row internally — Scan() is the last step
+type autoReleaseRow struct {
+	pgx.Row
+	conn *pgxpool.Conn
+}
+
+// dest is any dstination struct user will use
+func (r *autoReleaseRow) Scan(dest ...any) error {
+	err := r.Row.Scan(dest...)
+	r.conn.Release()
+	return err
+}
+
+// errRow surfaces an acquire error through the pgx.Row interface
+// This way QueryRow().Scan() always returns an error cleanly
+// even if we never got a connection
+type errRow struct {
+	err error
+}
+
+func (r *errRow) Scan(...any) error { return r.err }
