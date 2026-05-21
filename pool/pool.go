@@ -85,7 +85,7 @@ func New(ctx context.Context, cfg Config) (*Pool, error) {
 
 	inner, err := pgxpool.NewWithConfig(ctx, poolCfg)
 	if err != nil {
-		return nil, fmt.Errorf("pgkeeper/pool: create pool: %w", err)
+		return nil, fmt.Errorf("catfish/pool: create pool: %w", err)
 	}
 
 	p := &Pool{inner: inner, config: cfg}
@@ -93,14 +93,14 @@ func New(ctx context.Context, cfg Config) (*Pool, error) {
 	// Warm the pool: block until MinConns idle connections are established.
 	if err := p.warm(ctx); err != nil {
 		inner.Close()
-		return nil, fmt.Errorf("pgkeeper/pool: warming: %w", err)
+		return nil, fmt.Errorf("catfish/pool: warming: %w", err)
 	}
 
 	return p, nil
 }
 
 // returns pool stat using pgxpool functions
-func (p *Pool) Stat(ctx context.Context) *pgxpool.Stat {
+func (p *Pool) Stat() *pgxpool.Stat {
 	return p.inner.Stat()
 }
 
@@ -240,8 +240,7 @@ func drainRows(ctx context.Context, conn *pgx.Conn, maxDrainRows int32) (bool, e
 	// send false to delete connection, send true to keep it alive
 	rows, err := conn.Query(ctx, "SELECT 1 WHERE FALSE")
 	if err != nil {
-		fmt.Errorf("error during row drain probe %w", err)
-		return false, err
+		return false, fmt.Errorf("error during row drain probe %w", err)
 	}
 	defer rows.Close()
 
@@ -320,7 +319,7 @@ type autoReleaseTx struct {
 // user called Commit after tx, release the connection
 func (t *autoReleaseTx) Commit(ctx context.Context) error {
 	if t.done {
-		return fmt.Errorf("pgkeeper/pool: tx already closed")
+		return fmt.Errorf("catfish/pool: tx already closed")
 	}
 	t.done = true
 	err := t.Tx.Commit(ctx)
