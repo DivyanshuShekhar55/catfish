@@ -130,3 +130,66 @@ func (wc *coDelWaiter[T]) admit() bool {
 func (w *coDelWaiter[T]) drop() {
 	w.c <- false
 }
+
+// Next try implementing push, pop and reap methods
+func (c *coDel[T]) Push(wc *coDelWaiter[T], now time.Time) {
+	// because we push, it might be a trigger to cause mode change
+	c.setMode(now)
+	c.items.PushBack(wc)
+}
+
+// setMode appropriately sets the codelMode. Called internally.
+func (c *coDel[T]) setMode(now time.Time) {
+	if c.items.Len() == 0 {
+		c.mode = coDelModeFIFO
+		c.lastEmptied = now
+	} else if now.Sub(c.lastEmptied) > c.longTimeout {
+		c.mode = coDelModeLIFO
+	}
+}
+
+// returns the element popped, popped based on current mode
+// then tries to admit the element
+// it returns a bool representing success or failure and a value
+// if failed send a zero value (can NOT return nil as not supported for all types) along with false
+func (c *coDel[T]) pop(now time.Time) (T, bool) {
+	var zero T
+	if c.items.Len() == 0 {
+		return zero, false
+	}
+	var wc *coDelWaiter[T]
+	switch c.mode {
+	case coDelModeFIFO:
+		wc = c.items.PopFront()
+	case coDelModeLIFO:
+		wc = c.items.PopBack()
+	default:
+		panic("unreachable")
+	}
+	// its also a trigger to check if mode can change after pop
+	c.setMode(now)
+
+	// check if the popped item can be admiited
+	ok := wc.admit()
+	if !ok {
+		// if not admitted, was rejected by reap
+		return zero, false
+	}
+	// admitted
+	return wc.payload, true
+}
+
+// reap removes and wakes-unsuccessfully waiters that have timed out based on the current codelMode.
+// codel assumes this will be called at least once every longTimeout.
+func (c *coDel[T]) reap(now time.Time) {
+	c.setMode(now)
+	timeout := c.longTimeout
+	if c.mode == coDelModeLIFO {
+		timeout = c.shortTimeout
+	}
+	for c.items.Len() > 0 && now.Sub(c.items.Front().enqueued) > timeout {
+		item := c.items.PopFront()
+		item.drop()
+	}
+	c.setMode(now)
+}
