@@ -23,7 +23,6 @@ type Deque[T any] struct {
 	a     []T // the actual storage
 	front int // index of the first item
 	back  int // index of the last item (-1 means empty)
-	gen   int // version number — bumped on every change
 }
 
 func New[T any](capacity int) *Deque[T] {
@@ -84,7 +83,7 @@ func (d *Deque[T]) PushFront(x T) error {
 	if d.back == -1 {
 		d.back = d.front
 	}
-	d.gen++
+
 	return nil
 
 }
@@ -104,7 +103,7 @@ func (d *Deque[T]) PushBack(x T) error {
 		d.back = (d.back + 1) % len(d.a)
 	}
 	d.a[d.back] = x
-	d.gen++
+
 	return nil
 }
 
@@ -124,7 +123,7 @@ func (d *Deque[T]) PopFront() T {
 	}
 	d.a[d.front] = zero
 	d.front = (d.front + 1) % len(d.a)
-	d.gen++
+
 	return item
 }
 
@@ -144,7 +143,7 @@ func (d *Deque[T]) PopBack() T {
 	}
 	d.a[d.back] = zero
 	d.back = positiveMod(d.back-1, len(d.a))
-	d.gen++
+
 	return item
 }
 
