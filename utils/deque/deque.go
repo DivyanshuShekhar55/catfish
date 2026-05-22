@@ -2,8 +2,8 @@ package deque
 
 import "errors"
 
-var errDequeEmpty = errors.New("error: cannot pop from empty queue")
-var errDequeFull = errors.New("error: deque full, rejecting item")
+var errDequeEmpty = errors.New("catfish/deque: cannot pop from empty queue")
+var errDequeFull = errors.New("catfish/deque: deque full, rejecting item")
 
 // i guess a few 100 conns per app is usually setup in a connection pooler
 // so a 1/3-rd of the baseline is okay in the queue
@@ -48,7 +48,17 @@ func (d *Deque[T]) Len() int {
 	return len(d.a) - d.front + d.back + 1
 }
 
+// an important edge case to consider : 
+// go allows users to initialise structs as var s Deque[int]
+// since it doesn't call the New() it inits a nil slice
+// this can cause panic when checking for d.a[any_index] or when pushing or popping items to the slice
+// so we apply a d.a == nil check in all the functionalities 
+
 func (d *Deque[T]) IsFull() bool {
+	if d.a == nil {
+		return false
+	}
+
 	// d.Len() calculates length based on front and back pointer positions
 	// wheeras len(d.a) calculates the actual len of the underlying slice
 	if d.Len() == len(d.a) {
@@ -58,6 +68,11 @@ func (d *Deque[T]) IsFull() bool {
 }
 
 func (d *Deque[T]) PushFront(x T) error {
+	// Lazy allocate memory if struct was initialized as a zero-value
+	if d.a == nil {
+		d.a = make([]T, CAPACITY)
+	}
+
 	if d.IsFull() {
 		return errDequeFull
 	}
@@ -75,6 +90,11 @@ func (d *Deque[T]) PushFront(x T) error {
 }
 
 func (d *Deque[T]) PushBack(x T) error {
+	// Lazy allocate memory if struct was initialized as a zero-value
+	if d.a == nil {
+		d.a = make([]T, CAPACITY)
+	}
+
 	if d.IsFull() {
 		return errDequeFull
 	}
@@ -131,13 +151,18 @@ func (d *Deque[T]) PopBack() T {
 // Front returns the item at the front of the deque. It panics if the deque is empty.
 func (d *Deque[T]) Front() T {
 	if d.back == -1 {
-		panic("deque index out of range")
+		panic("catfish/deque: index out of range")
 	}
 	return d.a[d.front]
 }
 
 // Back returns the item at the back of the deque. It panics if the deque is empty.
 func (d *Deque[T]) Back() T {
+	// Added empty check protection to prevent runtime d.a[-1] crash
+	if d.back == -1 {
+		panic("catfish/deque: index out of range")
+	}
+
 	return d.a[d.back]
 }
 
