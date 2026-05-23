@@ -139,6 +139,7 @@ func (c *coDel[T]) Push(wc *coDelWaiter[T], now time.Time) {
 }
 
 // setMode appropriately sets the codelMode. Called internally.
+// called after pop, before doing a push and before and after both reap
 func (c *coDel[T]) setMode(now time.Time) {
 	if c.items.Len() == 0 {
 		c.mode = coDelModeFIFO
@@ -151,7 +152,7 @@ func (c *coDel[T]) setMode(now time.Time) {
 // returns the element popped, popped based on current mode
 // then tries to admit the element
 // it returns a bool representing success or failure and a value
-// if failed send a zero value (can NOT return nil as not supported for all types) along with false
+// if failed to admit send a zero value (can NOT return nil as not supported for all types in Go) along with false
 func (c *coDel[T]) pop(now time.Time) (T, bool) {
 	var zero T
 	if c.items.Len() == 0 {
@@ -180,7 +181,8 @@ func (c *coDel[T]) pop(now time.Time) (T, bool) {
 }
 
 // reap removes and wakes-unsuccessfully waiters that have timed out based on the current codelMode.
-// codel assumes this will be called at least once every longTimeout.
+// codel assumes this will be called at least once every longTimeout 
+// this assumption leads to change the timeout in the reap function itself
 func (c *coDel[T]) reap(now time.Time) {
 	c.setMode(now)
 	timeout := c.longTimeout
