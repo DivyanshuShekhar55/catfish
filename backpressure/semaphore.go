@@ -1,6 +1,7 @@
 package backpressure
 
 import (
+	"errors"
 	"sync"
 	"time"
 )
@@ -50,17 +51,24 @@ background goroutine
   └── fires every longTimeout → calls admit() → reap catches stale waiters
 */
 
+var ErrCapacityNil error = errors.New("catfish/semaphore : semaphore has 0 capacity")
+var ErrCapacityNegative error = errors.New("catfish/semaphore : semaphore has negative capacity")
+
+var infinity time.Duration = 365 * 24 * time.Hour
+
 type Semaphore struct {
-	m           sync.Mutex    // the single lock protecting everything
-	capacity    int           // max concurrent operations
-	outstanding int           // how many slots are currently taken
-	queues      []coDel[int]  // one waiting queue per priority level
-	debt        []linearDecay // one debt tracker per priority level
-	hasWaiters  bool          // are any queues non-empty right now?
-	reapTicker  *time.Ticker  // the stale waiter killer
-	longTimeout time.Duration // passed down to reap()
-	bgDone      chan struct{} // used to inform server/semaphore close
-	isClosed    bool          // tells if semaphore has closed
+	m                     sync.Mutex    // the single lock protecting everything
+	capacity              int           // max concurrent operations
+	outstanding           int           // how many slots are currently taken
+	queues                []*coDel[int] // one waiting queue per priority level
+	debt                  []linearDecay // one debt tracker per priority level
+	hasWaiters            bool          // are any queues non-empty right now?
+	reapTicker            *time.Ticker  // the stale waiter killer
+	bgDone                chan struct{} // used to inform server/semaphore close
+	isClosed              bool          // tells if semaphore has closed
+	longTimeout           time.Duration // passed down to reap(), how often to reap
+	debtForgivePerSuccess float64       // debt forgiveness amount (explanation later), if it is 0.1 means forgive 10% of current debt
+	debtDecayInterval     time.Duration // in how much time debt will completely decay/reset/forgiven/erase
 }
 
 // Additional options for the Semaphore type. These options do not frequently need to be tuned as
@@ -102,4 +110,51 @@ func SemaphoreDebtForgivePerSuccess(x float64) SemaphoreOption {
 	return SemaphoreOption{func(opts *semaphoreOptions) {
 		opts.debtForgivePerSuccess = x
 	}}
+}
+
+// NewSemaphore returns a semaphore with the given number of priorities, and will allow at most
+// capacity concurrency.
+// The other options do not frequently need to be modified.
+func NewSemaphore(prioritiesCount int, capacity int, options ...SemaphoreOption) *Semaphore {
+	if capacity < 0 {
+		panic(ErrCapacityNegative)
+	}
+	opts := semaphoreOptions{
+		shortTimeout:          5 * time.Millisecond,
+		longTimeout:           100 * time.Millisecond,
+		debtDecayInterval:     10 * time.Second,
+		debtForgivePerSuccess: 0.1,
+	}
+	for _, option := range options {
+		option.f(&opts)
+	}
+
+	now := time.Now()
+
+	// we don't init a mutex as by default it gets a 0 value
+	s := &Semaphore{
+		capacity:              capacity,
+		outstanding:           0,
+		queues:                make([]*coDel[int], prioritiesCount),
+		debt:                  make([]linearDecay, prioritiesCount),
+		hasWaiters:            false,
+		reapTicker:            time.NewTicker(infinity),
+		bgDone:                make(chan struct{}),
+		longTimeout:           opts.longTimeout,
+		debtForgivePerSuccess: opts.debtForgivePerSuccess,
+		debtDecayInterval:     opts.debtDecayInterval,
+	}
+
+	// init the codels and debt struct values (currently all set as default zero values)
+	for i := range s.queues {
+		s.queues[i] = NewCoDel[int](opts.shortTimeout, opts.longTimeout)
+		s.debt[i] = linearDecay{
+			last: now,
+			max:  float64(capacity), // can't have more seats reserved than there is capacity
+			// e.g., if capacity is 10 and we wish to decay debt in 10 seconds, then per second 1 unit debt should reduce
+			decayPerSec: float64(capacity) / opts.debtDecayInterval.Seconds(),
+		}
+	}
+
+	return s
 }
