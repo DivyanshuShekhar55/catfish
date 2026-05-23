@@ -149,6 +149,23 @@ func (c *coDel[T]) setMode(now time.Time) {
 	}
 }
 
+// returns the next item that would be removed by pop, if there is one. calling reap, setMode, or
+// push invalidates this value.
+func (c *coDel[T]) peek() (T, bool) {
+	if c.items.Len() == 0 {
+		var zero T
+		return zero, false
+	}
+	switch c.mode {
+	case coDelModeFIFO:
+		return c.items.Front().payload, true
+	case coDelModeLIFO:
+		return c.items.Back().payload, true
+	default:
+		panic("catfish/backpressure : unreachable")
+	}
+}
+
 // returns the element popped, popped based on current mode
 // then tries to admit the element
 // it returns a bool representing success or failure and a value
