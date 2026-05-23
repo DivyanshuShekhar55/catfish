@@ -251,9 +251,12 @@ func (s *Semaphore) Acquire(ctx context.Context, tokenDemand int, targetPriority
 		s.hasWaiters = true
 	}
 
+	// original implementation has a check for nil s.bgDone but we did that in New itself
+	// THINK : can it casue troubles?
 	s.admit(now)
 	s.m.Unlock()
 
+	// since req was not admitted make it wait
 	return cw.wait(ctx)
 
 }
@@ -279,6 +282,8 @@ func (s *Semaphore) background() {
 	}
 }
 
+// This is called whenever something changes (a slot freed, a new waiter joined)
+// It tries to push as many waiters through as possible
 func (s *Semaphore) admit(now time.Time) {
 	// drop stale ones
 	for i := range s.queues {
@@ -300,6 +305,9 @@ func (s *Semaphore) admit(now time.Time) {
 				break
 			}
 
+			// coDel.pop() -> returns the payload and a success flag bool
+			// if success also sends a true to the coDelWaiter's channel
+			// this removes the wait blockage
 			_, ok = queue.pop(now)
 			if ok {
 				s.outstanding += nextTokenDemand
@@ -321,4 +329,30 @@ func (s *Semaphore) canAdmit(now time.Time, tokenDemand int, targetPriority int)
 	available := float64(s.capacity) - float64(s.outstanding)
 	debt := s.debt[targetPriority].get(now)
 	return available > debt+float64(tokenDemand)
+}
+
+// Release returns the given number of tokens to the semaphore. It should only be called if these
+// tokens are known to be acquired from the semaphore with a corresponding Acquire.
+func (s *Semaphore) Release(tokens int) {
+	s.m.Lock()
+	s.outstanding -= tokens
+	if s.outstanding < 0 {
+		panic(ErrSemaphoreUnbalance)
+	}
+	s.admit(time.Now())
+	s.m.Unlock()
+}
+
+// Close frees background resources used by the semaphore.
+func (s *Semaphore) Close() {
+	s.m.Lock()
+	defer s.m.Unlock()
+	if s.isClosed {
+		return
+	}
+	s.isClosed= true
+	s.reapTicker.Stop()
+	if s.bgDone != nil {
+		close(s.bgDone)
+	}
 }
