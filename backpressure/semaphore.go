@@ -153,7 +153,6 @@ func NewSemaphore(prioritiesCount int, capacity int, options ...SemaphoreOption)
 
 	// start the background listener on a separate goroutine
 	// in original implementation, this is done in the Acquire function
-	go s.background()
 
 	// init the codels and debt struct values (currently all set as default zero values)
 	for i := range s.queues {
@@ -166,6 +165,7 @@ func NewSemaphore(prioritiesCount int, capacity int, options ...SemaphoreOption)
 		}
 	}
 
+	go s.background()
 	return s
 }
 
@@ -179,11 +179,19 @@ func (s *Semaphore) Acquire(ctx context.Context, tokenDemand int, targetPriority
 	s.m.Lock()
 
 	if s.isClosed {
+		s.m.Unlock()
 		panic(ErrSemaphoreAlreadyCLosed)
 	}
 
 	if s.capacity == 0 {
+		s.m.Unlock()
 		panic(ErrCapacityNil)
+	}
+
+	// Guard clause against dirty input indices
+	if targetPriority < 0 || targetPriority >= len(s.queues) {
+		s.m.Unlock()
+		return fmt.Errorf("invalid priority level %d", targetPriority)
 	}
 
 	if tokenDemand > s.capacity {
@@ -214,11 +222,12 @@ func (s *Semaphore) Acquire(ctx context.Context, tokenDemand int, targetPriority
 
 		// do a safety check before moving on
 		if s.outstanding > s.capacity {
+			s.m.Unlock()
 			panic(ErrSemaphoreUnbalance)
 		}
 
 		// decrease the debt for lower priorities, be a little generous
-		for i := targetPriority + 1; i <= len(s.debt); i++ {
+		for i := targetPriority + 1; i < len(s.debt); i++ {
 			s.debt[i].add(now, -(s.debtForgivePerSuccess * float64(tokenDemand)))
 			// Careful : Don't be to generous to everyone
 			// Make sure that we don't accidentally make lower debt for any lower priority. e.g. if
@@ -298,7 +307,7 @@ func (s *Semaphore) admit(now time.Time) {
 				break
 			}
 
-			// TODO 
+			// TODO
 			// I SHOULD BE REPLACED BY PRIORITY DATA TYPE
 			if !s.canAdmit(now, nextTokenDemand, i) {
 				// Not enough tokens or blocked by priority debt! Stop evaluating this queue.
@@ -328,7 +337,7 @@ func (s *Semaphore) admit(now time.Time) {
 func (s *Semaphore) canAdmit(now time.Time, tokenDemand int, targetPriority int) bool {
 	available := float64(s.capacity) - float64(s.outstanding)
 	debt := s.debt[targetPriority].get(now)
-	return available > debt+float64(tokenDemand)
+	return available >= debt+float64(tokenDemand)
 }
 
 // Release returns the given number of tokens to the semaphore. It should only be called if these
@@ -337,6 +346,7 @@ func (s *Semaphore) Release(tokens int) {
 	s.m.Lock()
 	s.outstanding -= tokens
 	if s.outstanding < 0 {
+		s.m.Unlock()
 		panic(ErrSemaphoreUnbalance)
 	}
 	s.admit(time.Now())
@@ -350,7 +360,7 @@ func (s *Semaphore) Close() {
 	if s.isClosed {
 		return
 	}
-	s.isClosed= true
+	s.isClosed = true
 	s.reapTicker.Stop()
 	if s.bgDone != nil {
 		close(s.bgDone)
