@@ -1,7 +1,9 @@
 package backpressure
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"time"
 )
@@ -51,10 +53,14 @@ background goroutine
   └── fires every longTimeout → calls admit() → reap catches stale waiters
 */
 
-var ErrCapacityNil error = errors.New("catfish/semaphore : semaphore has 0 capacity")
-var ErrCapacityNegative error = errors.New("catfish/semaphore : semaphore has negative capacity")
+var (
+	ErrCapacityNil            error = errors.New("catfish/backpressure : semaphore has 0 capacity")
+	ErrCapacityNegative       error = errors.New("catfish/backpressure : semaphore has negative capacity")
+	ErrSemaphoreAlreadyCLosed error = errors.New("catfish/backpressure : semaphore has already closed")
+	ErrSemaphoreUnbalance     error = errors.New("catfish/backpressure : unbalanced acquire and release in semaphores")
 
-var infinity time.Duration = 365 * 24 * time.Hour
+	infinity time.Duration = 365 * 24 * time.Hour
+)
 
 type Semaphore struct {
 	m                     sync.Mutex    // the single lock protecting everything
@@ -145,6 +151,10 @@ func NewSemaphore(prioritiesCount int, capacity int, options ...SemaphoreOption)
 		debtDecayInterval:     opts.debtDecayInterval,
 	}
 
+	// start the background listener on a separate goroutine
+	// in original implementation, this is done in the Acquire function
+	go s.background()
+
 	// init the codels and debt struct values (currently all set as default zero values)
 	for i := range s.queues {
 		s.queues[i] = NewCoDel[int](opts.shortTimeout, opts.longTimeout)
@@ -157,4 +167,158 @@ func NewSemaphore(prioritiesCount int, capacity int, options ...SemaphoreOption)
 	}
 
 	return s
+}
+
+// Acquire attempts to acquire some number of tokens from the semaphore on behalf of the given
+// priority. If Acquire succedes it returns nil, and the acquired tokens should be returned to the semaphore when the
+// caller is finished with them by using Release. Acquire returns non-nil if the given context
+// expires before the tokens can be acquired, or if the request is rejected for timing out with the
+// semaphore's own timeout.
+func (s *Semaphore) Acquire(ctx context.Context, tokenDemand int, targetPriority int) error {
+	// take the lock, so multiple workers(tcp listeners) can't acquire at once
+	s.m.Lock()
+
+	if s.isClosed {
+		panic(ErrSemaphoreAlreadyCLosed)
+	}
+
+	if s.capacity == 0 {
+		panic(ErrCapacityNil)
+	}
+
+	if tokenDemand > s.capacity {
+		s.m.Unlock()
+		return fmt.Errorf(
+			"tried to Acquire %d tokens, semaphore only has capacity for %d",
+			tokenDemand,
+			s.capacity,
+		)
+	}
+
+	now := time.Now()
+
+	// check if there is a higher priority request already available
+	// e.g., if tokenDemand is 2 tokens from targetPriority = 3, then run a loop from priority levels - 0 till 3
+	// if they are not empty, it means a higher priority is available
+	isHigherPriorityPresent := false
+	for i := 0; i <= targetPriority; i++ {
+		if !s.queues[i].empty() {
+			isHigherPriorityPresent = true
+			break
+		}
+	}
+
+	// if req can be admitted straight
+	if !isHigherPriorityPresent && s.canAdmit(now, tokenDemand, targetPriority) {
+		s.outstanding += tokenDemand
+
+		// do a safety check before moving on
+		if s.outstanding > s.capacity {
+			panic(ErrSemaphoreUnbalance)
+		}
+
+		// decrease the debt for lower priorities, be a little generous
+		for i := targetPriority + 1; i <= len(s.debt); i++ {
+			s.debt[i].add(now, -(s.debtForgivePerSuccess * float64(tokenDemand)))
+			// Careful : Don't be to generous to everyone
+			// Make sure that we don't accidentally make lower debt for any lower priority. e.g. if
+			// p=0 waits and increases debt for p=1 and p=2, then a p=1 succeeds, p=2 would end with
+			// lower debt than p=1 which makes no sense.
+			s.debt[i].floor(now, s.debt[i-1].get(now))
+		}
+
+		s.m.Unlock()
+		return nil
+
+	}
+
+	// a request couldn't pass through
+	// be a little stricter now
+	for i := int(targetPriority) + 1; i < len(s.debt); i++ {
+		s.debt[i].add(now, float64(tokenDemand))
+
+		// safety check
+		s.debt[i].setMax(now, float64(s.capacity))
+	}
+
+	// wrap req into a codelWaiter and put into queue
+	cw := newCoDelWaiter(now, tokenDemand)
+	s.queues[targetPriority].Push(cw, now)
+
+	// check if reap timer is running
+	if !s.hasWaiters {
+		s.reapTicker.Reset(s.longTimeout)
+		s.hasWaiters = true
+	}
+
+	s.admit(now)
+	s.m.Unlock()
+
+	return cw.wait(ctx)
+
+}
+
+func (s *Semaphore) background() {
+	// keeps listening for events forever
+	for {
+		select {
+		case <-s.bgDone:
+			return
+		case <-s.reapTicker.C:
+			s.m.Lock()
+			if s.reapTicker == nil {
+				s.m.Unlock()
+				return
+			}
+			now := time.Now()
+			// admit calls the reaper, so just call admit
+			s.admit(now)
+			s.m.Unlock()
+
+		}
+	}
+}
+
+func (s *Semaphore) admit(now time.Time) {
+	// drop stale ones
+	for i := range s.queues {
+		s.queues[i].reap(now)
+	}
+	for i := range s.queues {
+		queue := s.queues[i]
+		for {
+			nextTokenDemand, ok := queue.peek()
+			if !ok {
+				// Queue is empty, move to next lowest priority
+				break
+			}
+
+			// TODO 
+			// I SHOULD BE REPLACED BY PRIORITY DATA TYPE
+			if !s.canAdmit(now, nextTokenDemand, i) {
+				// Not enough tokens or blocked by priority debt! Stop evaluating this queue.
+				break
+			}
+
+			_, ok = queue.pop(now)
+			if ok {
+				s.outstanding += nextTokenDemand
+			}
+		}
+
+		if !queue.empty() {
+			return
+		}
+	}
+	// All queues are empty.
+	if s.hasWaiters {
+		s.reapTicker.Reset(infinity)
+		s.hasWaiters = false
+	}
+}
+
+func (s *Semaphore) canAdmit(now time.Time, tokenDemand int, targetPriority int) bool {
+	available := float64(s.capacity) - float64(s.outstanding)
+	debt := s.debt[targetPriority].get(now)
+	return available > debt+float64(tokenDemand)
 }
