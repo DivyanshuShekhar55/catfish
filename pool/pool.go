@@ -12,7 +12,7 @@ import (
 )
 
 type Config struct {
-	dsn                 string
+	DSN                 string
 	minConns            int32
 	maxConns            int32
 	maxIdleTime         time.Duration
@@ -46,7 +46,7 @@ type Pool struct {
 
 func New(ctx context.Context, cfg Config) (*Pool, error) {
 	cfg.SetDefault()
-	poolCfg, err := pgxpool.ParseConfig(cfg.dsn)
+	poolCfg, err := pgxpool.ParseConfig(cfg.DSN)
 
 	if err != nil {
 		return nil, fmt.Errorf("error with parsing connection string %w", err)

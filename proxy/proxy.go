@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net"
@@ -8,68 +9,83 @@ import (
 	"time"
 
 	"github.com/DivyanshuShekhar55/catfish/backpressure"
+	"github.com/DivyanshuShekhar55/catfish/config"
 	"github.com/DivyanshuShekhar55/catfish/pool"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgproto3"
 )
 
 var (
-	ErrProxyTcpLlistener error = errors.New("catfish/proxy : error starting tcp listener ")
-	ErrReadStartupMsg    error = errors.New("catfish/proxy : error reading auth stratup msg ")
+	ErrPoolCreation error = errors.New("catfish/proxy : error creating pool, closing all pools ")
+	ErrProxyTcpLlistener             error = errors.New("catfish/proxy : error starting tcp listener ")
+	ErrReadStartupMsg                error = errors.New("catfish/proxy : error reading auth stratup msg ")
 	ErrReadStartupMsgAfterSSLDecline error = errors.New("catfish/proxy : error reading auth stratup msg after SSL declined ")
-	ErrUnexpectedStartupMsg error = errors.New("catfish/proxy : unexpected startup message ")
-
+	ErrUnexpectedStartupMsg          error = errors.New("catfish/proxy : unexpected startup message ")
 )
-
-// CATFISH SERVER STATE
-// one global state
-
-type CatfishConfig struct {
-	ClientListenerAddr string // like ":6432"
-	PostgresDSN        string // the real conn string like localhost:5432/products/...
-	ShutdownTimeout    time.Duration
-
-	// usernames and their priority slots.
-	// Configured in pgkeeper.yml as a list of Postgres usernames.
-	UserPirorityList [][]string
-}
-
-func (c *CatfishConfig) setDefaults() {
-	if c.ClientListenerAddr == "" {
-		c.ClientListenerAddr = ":6432"
-	}
-	if c.ShutdownTimeout == 0 {
-		c.ShutdownTimeout = 10 * time.Second
-	}
-}
 
 // use the close once function, so multiple goroutines do not call close at the same time.
 // Calling close() from multiple goroutines at the same time causes panic
 // which is against the graceful shutdown process
 type CatfishServer struct {
-	config    CatfishConfig
-	pool      *pool.Pool
+	config    *config.Config
+	pools     map[string]*pool.Pool // we will have one pool per user-db pair
 	semaphore *backpressure.Semaphore
 
+	userIndex      map[string]config.User
 	clientListener net.Listener
 	wg             sync.WaitGroup
 	closeOnce      sync.Once
 	done           chan struct{}
 }
 
-func New(cfg CatfishConfig, pool *pool.Pool, semaphore *backpressure.Semaphore) *CatfishServer {
-	cfg.setDefaults()
+func New(ctx context.Context, cfg *config.Config, semaphore *backpressure.Semaphore) (*CatfishServer, error) {
+	pools := make(map[string]*pool.Pool, len(cfg.Users))
+	userIndex := make(map[string]config.User, len(cfg.Users))
+
+	for _, user := range cfg.Users {
+		// we will create a key to identify an unique pair of user-db
+		key:= poolKey(user.Username, user.Database)
+
+		// dsn goes like some particular user wants to connect to some database
+		// the machine address (PostgresHost) will be fixed and fetched from config, same with PostgresPort
+		dsn:= fmt.Sprintf(
+			"postgres://%s:%s@%s:%d/%s",
+			user.Username,
+			user.Password,
+			cfg.PostgresHost,
+			cfg.PostgresPort,
+			user.Database,
+		)
+		
+		// create a new pool for this (user, db) pair
+		// TODO : set other parts of pool.Config too here
+		p, err:= pool.New(ctx, pool.Config{DSN: dsn})
+		if err!=nil {
+			// close all other pools too
+			// TODO: IS IT A GOOD DECISION ?
+			for _, existing := range pools {
+				existing.Close()
+			}
+
+			return nil, fmt.Errorf(ErrPoolCreation.Error(), user.Username, user.Database, err)
+		}
+
+		// all good, add to pools
+		pools[key] = p 
+		userIndex[user.Username] = user
+	}
 
 	return &CatfishServer{
 		config:    cfg,
-		pool:      pool,
+		pools:      pools,
+		userIndex: userIndex,
 		semaphore: semaphore,
 		done:      make(chan struct{}),
-	}
+	}, nil
 }
 
 func (s *CatfishServer) Listen() error {
-	ln, err := net.Listen("tcp", s.config.ClientListenerAddr)
+	ln, err := net.Listen("tcp", s.config.ListenerAddr)
 	if err != nil {
 		return fmt.Errorf(ErrProxyTcpLlistener.Error(), err)
 	}
@@ -193,9 +209,6 @@ func (s *CatfishServer) doAuth(backend *pgproto3.Backend, appConn net.Conn, clie
 	return nil, nil
 }
 
-
-
-
 // parses the DSN string ( e.g., postgres://user:pass@myhost:5433/mydb) using pgx's built-in parser,
 // then pulls out just the host and port and returns them as "myhost:5433" — the format net.Dial needs.
 // if malformed fallback to localhost:5432
@@ -208,3 +221,6 @@ func postgresAddr(dsn string) string {
 	return fmt.Sprintf("%s:%d", cfg.Host, cfg.Port)
 }
 
+func poolKey(username, database string) string {
+	return username + "/" + database
+}
