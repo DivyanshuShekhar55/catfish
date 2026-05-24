@@ -16,11 +16,16 @@ import (
 )
 
 var (
-	ErrPoolCreation error = errors.New("catfish/proxy : error creating pool, closing all pools ")
+	ErrPoolCreation                  error = errors.New("catfish/proxy : error creating pool, closing all pools ")
 	ErrProxyTcpLlistener             error = errors.New("catfish/proxy : error starting tcp listener ")
 	ErrReadStartupMsg                error = errors.New("catfish/proxy : error reading auth stratup msg ")
 	ErrReadStartupMsgAfterSSLDecline error = errors.New("catfish/proxy : error reading auth stratup msg after SSL declined ")
 	ErrUnexpectedStartupMsg          error = errors.New("catfish/proxy : unexpected startup message ")
+	ErrAuthFailed                    error = errors.New("authentication failed ")
+	ErrUnknownUser                   error = errors.New("catfish/proxy : Unknown User ")
+	ErrDatabaseConnectionNotConfigured error = errors.New("user not configured to connect to this database ")
+
+	ErrCodeAuthFailed string = "28P01"
 )
 
 // use the close once function, so multiple goroutines do not call close at the same time.
@@ -44,11 +49,11 @@ func New(ctx context.Context, cfg *config.Config, semaphore *backpressure.Semaph
 
 	for _, user := range cfg.Users {
 		// we will create a key to identify an unique pair of user-db
-		key:= poolKey(user.Username, user.Database)
+		key := poolKey(user.Username, user.Database)
 
 		// dsn goes like some particular user wants to connect to some database
 		// the machine address (PostgresHost) will be fixed and fetched from config, same with PostgresPort
-		dsn:= fmt.Sprintf(
+		dsn := fmt.Sprintf(
 			"postgres://%s:%s@%s:%d/%s",
 			user.Username,
 			user.Password,
@@ -56,11 +61,11 @@ func New(ctx context.Context, cfg *config.Config, semaphore *backpressure.Semaph
 			cfg.PostgresPort,
 			user.Database,
 		)
-		
+
 		// create a new pool for this (user, db) pair
 		// TODO : set other parts of pool.Config too here
-		p, err:= pool.New(ctx, pool.Config{DSN: dsn})
-		if err!=nil {
+		p, err := pool.New(ctx, pool.Config{DSN: dsn})
+		if err != nil {
 			// close all other pools too
 			// TODO: IS IT A GOOD DECISION ?
 			for _, existing := range pools {
@@ -71,13 +76,13 @@ func New(ctx context.Context, cfg *config.Config, semaphore *backpressure.Semaph
 		}
 
 		// all good, add to pools
-		pools[key] = p 
+		pools[key] = p
 		userIndex[user.Username] = user
 	}
 
 	return &CatfishServer{
 		config:    cfg,
-		pools:      pools,
+		pools:     pools,
 		userIndex: userIndex,
 		semaphore: semaphore,
 		done:      make(chan struct{}),
@@ -87,7 +92,7 @@ func New(ctx context.Context, cfg *config.Config, semaphore *backpressure.Semaph
 func (s *CatfishServer) Listen() error {
 	ln, err := net.Listen("tcp", s.config.ListenerAddr)
 	if err != nil {
-		return fmt.Errorf(ErrProxyTcpLlistener.Error(), err)
+		return fmt.Errorf(ErrProxyTcpLlistener.Error(), s.config.ListenerAddr, err)
 	}
 
 	s.clientListener = ln
@@ -139,6 +144,11 @@ func (s *CatfishServer) Close() {
 		case <-waitDone:
 		case <-time.After(s.config.ShutdownTimeout):
 		}
+
+		// close all the pools too
+		for _, p := range s.pools {
+			p.Close()
+		}
 	})
 }
 
@@ -148,7 +158,7 @@ func (s *CatfishServer) Close() {
 type clientState struct {
 	username        string
 	database        string
-	priority        backpressure.Priority
+	tier            string
 	queryInProgress bool   // is there any running query, not finished yet (used during flush logic in pooler)
 	txStatus        byte   // 'I'(idle), 'E'(error), 'T'(in tx), used in pooler afterRelease logic
 	backendPID      uint32 // to track and cancel
@@ -157,16 +167,23 @@ type clientState struct {
 
 // after it is accepted by our server
 // the tcp conn now should be able to send queries and receive results
-func (s *CatfishServer) handleClient(conn net.Conn) {
-	defer conn.Close()
+func (s *CatfishServer) handleClient(appConn net.Conn) {
+	defer appConn.Close()
 
 	// backend reads messages FROM the app (app is the client/frontend).
-	backend := pgproto3.NewBackend(conn, conn)
-	state := &clientState{txStatus: 'I'}
+	backend := pgproto3.NewBackend(appConn, appConn)
+	clientState := &clientState{txStatus: 'I'}
 
 	// Step 1: auth — forward the full handshake to real Postgres.
-	pgConn, err := s.doAuth(backend, conn, state)
-	fmt.Printf(pgConn.LocalAddr().Network(), err.Error())
+	err := s.doAuth(backend, appConn, clientState)
+	if err != nil {
+		sendError(backend, ErrCodeAuthFailed, ErrAuthFailed.Error()+err.Error())
+		// since this client failed to
+		sendReadyForQuery(backend, 'I')
+		return
+	}
+
+	// TODO : COME BACK AFTER FINISHING AUTH
 
 }
 
@@ -174,11 +191,11 @@ func (s *CatfishServer) handleClient(conn net.Conn) {
 // We peek at StartupMessage for username/database and BackendKeyData for
 // the cancel PID/secret. Everything else is forwarded blindly.
 // NOTE: if you want a load balancer/ sharded postgres query forwarder, it would be done once you have the user-db
-func (s *CatfishServer) doAuth(backend *pgproto3.Backend, appConn net.Conn, clientState *clientState) (net.Conn, error) {
+func (s *CatfishServer) doAuth(backend *pgproto3.Backend, appConn net.Conn, clientState *clientState) error {
 	// read startup msg from app
 	startupMsg, err := backend.ReceiveStartupMessage()
 	if err != nil {
-		return nil, fmt.Errorf(ErrReadStartupMsg.Error(), err)
+		return fmt.Errorf(ErrReadStartupMsg.Error(), err)
 	}
 
 	// Handle SSL req, decline TLS for now
@@ -189,24 +206,37 @@ func (s *CatfishServer) doAuth(backend *pgproto3.Backend, appConn net.Conn, clie
 		// update startup msg
 		startupMsg, err = backend.ReceiveStartupMessage()
 		if err != nil {
-			return nil, fmt.Errorf(ErrReadStartupMsgAfterSSLDecline.Error(), err)
+			return fmt.Errorf(ErrReadStartupMsgAfterSSLDecline.Error(), err)
 		}
+
+		
 
 	}
 	sm, ok := startupMsg.(*pgproto3.StartupMessage)
 	if !ok {
-		return nil, fmt.Errorf(ErrUnexpectedStartupMsg.Error(), startupMsg)
+		return fmt.Errorf(ErrUnexpectedStartupMsg.Error(), startupMsg)
 	}
 
 	// can extract these two fields too now
-	clientState.username = sm.Parameters["user"]
-	clientState.database = sm.Parameters["database"]
+	username := sm.Parameters["user"]
+	database := sm.Parameters["database"]
+
+	// lokup user in config
+	entry, wasFound := s.userIndex[username]
+	if !wasFound {
+		return fmt.Errorf(ErrUnknownUser.Error(), username)
+	}
+
+	// check this user is allowed to connect to this db
+	if entry.Database != database {
+		return fmt.Errorf(ErrDatabaseConnectionNotConfigured.Error(), username, database)
+	}
 
 	// Open raw TCP connection to real postgres now
 	// upto now we were handling the messages with the client
 	// auth ahead will just be blindly forwarded now
 	//pgConn, err := net.Dial("tcp", postgresAddr(s.config.PostgresDSN))
-	return nil, nil
+	return nil
 }
 
 // parses the DSN string ( e.g., postgres://user:pass@myhost:5433/mydb) using pgx's built-in parser,
@@ -223,4 +253,18 @@ func postgresAddr(dsn string) string {
 
 func poolKey(username, database string) string {
 	return username + "/" + database
+}
+
+func sendError(backend *pgproto3.Backend, code, message string) {
+	backend.Send(&pgproto3.ErrorResponse{
+		Severity: "ERROR",
+		Code:     code,
+		Message:  message,
+	})
+}
+
+// sends a signal that next query can be run now
+// kinda like backend yelling "I am free now"
+func sendReadyForQuery(backend *pgproto3.Backend, txStatus byte) {
+	backend.Send(&pgproto3.ReadyForQuery{TxStatus: txStatus})
 }
