@@ -33,6 +33,10 @@ var (
 	ErrMD5AuthRead                     error = errors.New("catfish/proxy : md5 read response error ")
 	ErrMD5AuthUnexpectedFormat         error = errors.New("catfish/proxy : md5 unexpected PasswordMessage format ")
 	ErrMD5AuthInvalidCredentials       error = errors.New("catfish/proxy : md5 wrong credentials for user ")
+	ErrSCRAMAuthChallengeSend          error = errors.New("catfish/proxy : scram send mechanism list ")
+	ErrSCRAMAuthRead                   error = errors.New("catfish/proxy : scram auth read error ")
+	ErrSCRAMAuthUnexpectedFormat       error = errors.New("catfish/proxy : unexpected SASLInitResponse ")
+	ErrSCRAMAuthUnexpectedMethod       error = errors.New("catfish/proxy : client chose unexpected mechanism scram ")
 
 	ErrCodeAuthFailed string = "28P01"
 )
