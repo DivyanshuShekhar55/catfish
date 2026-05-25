@@ -35,7 +35,7 @@ const (
 // populates clientState, and sends AuthenticationOK + ReadyForQuery on success.
 // doAuth relays the entire Postgres auth conversation between app and Postgres.
 
-func (s *CatfishServer) doAuth(backend *pgproto3.Backend, appConn net.Conn, clientState *clientState) error {
+func (s *CatfishServer) doAuth(backend *pgproto3.Backend, appConn net.Conn) error {
 	// 1. read startup msg from app
 	startupMsg, err := backend.ReceiveStartupMessage()
 	if err != nil {

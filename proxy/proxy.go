@@ -185,10 +185,10 @@ func (s *CatfishServer) handleClient(appConn net.Conn) {
 
 	// backend reads messages FROM the app (app is the client/frontend).
 	backend := pgproto3.NewBackend(appConn, appConn)
-	clientState := &clientState{txStatus: 'I'}
+	//clientState := &clientState{txStatus: 'I'}
 
 	// Step 1: auth — forward the full handshake to real Postgres.
-	err := s.doAuth(backend, appConn, clientState)
+	err := s.doAuth(backend, appConn)
 	if err != nil {
 		sendError(backend, ErrCodeAuthFailed, ErrAuthFailed.Error()+err.Error())
 		// since this client failed to
@@ -222,10 +222,12 @@ func sendError(backend *pgproto3.Backend, code, message string) {
 		Code:     code,
 		Message:  message,
 	})
+	backend.Flush(); // ignore error, best effort
 }
 
 // sends a signal that next query can be run now
 // kinda like backend yelling "I am free now"
 func sendReadyForQuery(backend *pgproto3.Backend, txStatus byte) {
 	backend.Send(&pgproto3.ReadyForQuery{TxStatus: txStatus})
+	backend.Flush(); // ignore error, best effort
 }
