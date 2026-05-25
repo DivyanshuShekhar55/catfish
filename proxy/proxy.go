@@ -16,14 +16,18 @@ import (
 )
 
 var (
-	ErrPoolCreation                  error = errors.New("catfish/proxy : error creating pool, closing all pools ")
-	ErrProxyTcpLlistener             error = errors.New("catfish/proxy : error starting tcp listener ")
-	ErrReadStartupMsg                error = errors.New("catfish/proxy : error reading auth stratup msg ")
-	ErrReadStartupMsgAfterSSLDecline error = errors.New("catfish/proxy : error reading auth stratup msg after SSL declined ")
-	ErrUnexpectedStartupMsg          error = errors.New("catfish/proxy : unexpected startup message ")
-	ErrAuthFailed                    error = errors.New("authentication failed ")
-	ErrUnknownUser                   error = errors.New("catfish/proxy : Unknown User ")
-	ErrDatabaseConnectionNotConfigured error = errors.New("user not configured to connect to this database ")
+	ErrPoolCreation                    error = errors.New("catfish/proxy : error creating pool, closing all pools ")
+	ErrProxyTcpLlistener               error = errors.New("catfish/proxy : error starting tcp listener ")
+	ErrReadStartupMsg                  error = errors.New("catfish/proxy : error reading auth stratup msg ")
+	ErrReadStartupMsgAfterSSLDecline   error = errors.New("catfish/proxy : error reading auth stratup msg after SSL declined ")
+	ErrUnexpectedStartupMsg            error = errors.New("catfish/proxy : unexpected startup message ")
+	ErrAuthFailed                      error = errors.New("authentication failed ")
+	ErrUnknownUser                     error = errors.New("catfish/proxy : Unknown User ")
+	ErrDatabaseConnectionNotConfigured error = errors.New("catfish/proxy : user not configured to connect to this database ")
+	ErrClearTextAuthChallengeSend      error = errors.New("catfish/proxy : error during sending clear text challenge to user ")
+	ErrClearTextAuthRead               error = errors.New("catfish/proxy : error reading response ")
+	ErrClearTextAuthUnexpectedFormat   error = errors.New("catfish/proxy : cleartext auth expected PasswordMessage, received different format ")
+	ErrClearTextAuthInvalidPassword    error = errors.New("catfish.proxy : wrong password ")
 
 	ErrCodeAuthFailed string = "28P01"
 )
@@ -185,58 +189,6 @@ func (s *CatfishServer) handleClient(appConn net.Conn) {
 
 	// TODO : COME BACK AFTER FINISHING AUTH
 
-}
-
-// doAuth relays the entire Postgres auth conversation between app and Postgres.
-// We peek at StartupMessage for username/database and BackendKeyData for
-// the cancel PID/secret. Everything else is forwarded blindly.
-// NOTE: if you want a load balancer/ sharded postgres query forwarder, it would be done once you have the user-db
-func (s *CatfishServer) doAuth(backend *pgproto3.Backend, appConn net.Conn, clientState *clientState) error {
-	// read startup msg from app
-	startupMsg, err := backend.ReceiveStartupMessage()
-	if err != nil {
-		return fmt.Errorf(ErrReadStartupMsg.Error(), err)
-	}
-
-	// Handle SSL req, decline TLS for now
-	// TODO : TLS setup as well
-	if _, ok := startupMsg.(*pgproto3.SSLRequest); ok {
-		appConn.Write([]byte{'N'}) // 'N' = no SSL for now, sends back to client
-		// client will send user+db now to backend
-		// update startup msg
-		startupMsg, err = backend.ReceiveStartupMessage()
-		if err != nil {
-			return fmt.Errorf(ErrReadStartupMsgAfterSSLDecline.Error(), err)
-		}
-
-		
-
-	}
-	sm, ok := startupMsg.(*pgproto3.StartupMessage)
-	if !ok {
-		return fmt.Errorf(ErrUnexpectedStartupMsg.Error(), startupMsg)
-	}
-
-	// can extract these two fields too now
-	username := sm.Parameters["user"]
-	database := sm.Parameters["database"]
-
-	// lokup user in config
-	entry, wasFound := s.userIndex[username]
-	if !wasFound {
-		return fmt.Errorf(ErrUnknownUser.Error(), username)
-	}
-
-	// check this user is allowed to connect to this db
-	if entry.Database != database {
-		return fmt.Errorf(ErrDatabaseConnectionNotConfigured.Error(), username, database)
-	}
-
-	// Open raw TCP connection to real postgres now
-	// upto now we were handling the messages with the client
-	// auth ahead will just be blindly forwarded now
-	//pgConn, err := net.Dial("tcp", postgresAddr(s.config.PostgresDSN))
-	return nil
 }
 
 // parses the DSN string ( e.g., postgres://user:pass@myhost:5433/mydb) using pgx's built-in parser,

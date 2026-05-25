@@ -23,4 +23,5 @@ type User struct {
 	Database string // db they want to connect to "products"
 	Password string // loaded from env at load time
 	Tier string 
+	AuthMethod string // "cleartext", "md5" or "scram-sha-256"
 }
