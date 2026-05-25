@@ -1,6 +1,9 @@
 package proxy
 
 import (
+	"crypto/md5"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"net"
 
@@ -48,7 +51,7 @@ func (s *CatfishServer) doAuth(backend *pgproto3.Backend, appConn net.Conn, clie
 	}
 	sm, ok := startupMsg.(*pgproto3.StartupMessage)
 	if !ok {
-		return fmt.Errorf(ErrUnexpectedStartupMsg.Error(), startupMsg)
+		return fmt.Errorf(ErrStartupMsgUnexpectedFormat.Error(), startupMsg)
 	}
 
 	// 2. Look up user in config
@@ -117,4 +120,71 @@ func authClearText(backend *pgproto3.Backend, entry config.User) error {
 
 	// auth succeded
 	return nil
+}
+
+// Method 2: MD5
+// Postgres MD5 auth works like this:
+//  1. Server sends a 4-byte random salt to the client
+//  2. Client computes: md5(md5(password + username) + salt)
+//  3. Client sends "md5" + that hex string
+//  4. Server does the same computation and compares
+//
+// It hides the password on the wire but MD5 is weak by modern standards.
+// Better than cleartext but SCRAM is preferred for new deployments.
+func authMD5(backend *pgproto3.Backend, entry config.User) error {
+	// generate random salt
+	var salt [4]byte
+	if _, err := rand.Read(salt[:]); err != nil {
+		return fmt.Errorf(ErrMD5AuthSaltGen.Error(), err)
+	}
+
+	// send
+	backend.Send(&pgproto3.AuthenticationMD5Password{Salt: salt})
+	if err := backend.Flush(); err != nil {
+		return fmt.Errorf(ErrMD5AuthChallengeSend.Error(), err)
+	}
+
+	// read client's hashed response
+	msg, err := backend.Receive()
+	if err != nil {
+		return fmt.Errorf(ErrMD5AuthRead.Error(), err)
+	}
+
+	pwMsg, ok := msg.(*pgproto3.PasswordMessage)
+	if !ok {
+		return fmt.Errorf(ErrMD5AuthUnexpectedFormat.Error(), msg)
+	}
+
+	// compute hash's value, will later be comapred with received hash
+	expectedHash := md5Password(entry.Password, entry.Username, salt[:])
+
+	if pwMsg.Password != expectedHash {
+		return fmt.Errorf(ErrMD5AuthInvalidCredentials.Error(), entry.Username)
+	}
+
+	return nil
+}
+
+func md5Password(password, username string, salt []byte) string {
+	// Step 1: inner hash = md5(password + username)
+	inner := md5.New()
+	inner.Write([]byte(password))
+	inner.Write([]byte(username))
+	innerSum := inner.Sum(nil) // nil will force go to allocate fresh memory allocation
+
+	// Convert inner sum to a 32-character hex string buffer
+	innerHex := make([]byte, 32)
+	hex.Encode(innerHex, innerSum)
+
+	// Step 2: outer hash = md5(innerHexStr + binarySalt)
+	outer := md5.New()
+	outer.Write(innerHex)
+	outer.Write(salt[:]) // Pass the 4 raw binary bytes
+	outerSum := outer.Sum(nil)
+
+	// Encode final result and prefix with "md5"
+	finalHex := make([]byte, 32)
+	hex.Encode(finalHex, outerSum)
+
+	return "md5" + string(finalHex)
 }
