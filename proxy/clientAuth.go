@@ -7,7 +7,6 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
-	"errors"
 	"fmt"
 	"net"
 	"strings"
@@ -40,7 +39,7 @@ func (s *CatfishServer) doAuth(backend *pgproto3.Backend, appConn net.Conn, clie
 	// 1. read startup msg from app
 	startupMsg, err := backend.ReceiveStartupMessage()
 	if err != nil {
-		return fmt.Errorf(ErrReadStartupMsg.Error(), err)
+		return fmt.Errorf("%w: %w", ErrReadStartupMsg, err)
 	}
 
 	// Handle SSL req, decline TLS for now
@@ -51,13 +50,13 @@ func (s *CatfishServer) doAuth(backend *pgproto3.Backend, appConn net.Conn, clie
 		// update startup msg
 		startupMsg, err = backend.ReceiveStartupMessage()
 		if err != nil {
-			return fmt.Errorf(ErrReadStartupMsgAfterSSLDecline.Error(), err)
+			return fmt.Errorf("%w: %w", ErrReadStartupMsgAfterSSLDecline, err)
 		}
 
 	}
 	sm, ok := startupMsg.(*pgproto3.StartupMessage)
 	if !ok {
-		return fmt.Errorf(ErrStartupMsgUnexpectedFormat.Error(), startupMsg)
+		return fmt.Errorf("%w: %T", ErrStartupMsgUnexpectedFormat, startupMsg)
 	}
 
 	// 2. Look up user in config
@@ -69,14 +68,14 @@ func (s *CatfishServer) doAuth(backend *pgproto3.Backend, appConn net.Conn, clie
 	// lokup user in config
 	entry, wasFound := s.userIndex[username]
 	if !wasFound {
-		return fmt.Errorf(ErrUnknownUser.Error(), username)
+		return fmt.Errorf("%w: %s", ErrUnknownUser, username)
 	}
 
 	// user was in entry, ebrything good
 	// run the configured auth method
 	// check this user is allowed to connect to this db
 	if entry.Database != database {
-		return fmt.Errorf(ErrDatabaseConnectionNotConfigured.Error(), username, database)
+		return fmt.Errorf("%w: user=%s db=%s", ErrDatabaseConnectionNotConfigured, username, database)
 	}
 
 	// 3. Run the authentication method configured for this user
@@ -99,7 +98,7 @@ func (s *CatfishServer) doAuth(backend *pgproto3.Backend, appConn net.Conn, clie
 			return err
 		}
 	default:
-		return fmt.Errorf(ErrUnknownAuthMethod.Error(), username, database)
+		return fmt.Errorf("%w: user=%s db=%s", ErrUnknownAuthMethod, username, database)
 
 	}
 
@@ -121,14 +120,14 @@ func (s *CatfishServer) doAuth(backend *pgproto3.Backend, appConn net.Conn, clie
 	}
 	// flsuh all the statuses + authOK together
 	if err := backend.Flush(); err != nil {
-		return errors.Join(ErrParameterStatusSend, ErrAuthOKSend, err)
+		return fmt.Errorf("%w: %w: %w", ErrParameterStatusSend, ErrAuthOKSend, err)
 	}
 
 	// send ready for query signal
 	// everything done now in this func ;)
 	backend.Send(&pgproto3.ReadyForQuery{TxStatus: 'I'})
 	if err := backend.Flush(); err != nil {
-		return errors.Join(ErrReadyForQuerySend, err)
+		return fmt.Errorf("%w: %w", ErrReadyForQuerySend, err)
 	}
 
 	return nil
@@ -140,23 +139,23 @@ func authClearText(backend *pgproto3.Backend, entry config.User) error {
 	// Tell app: send your password as plain text.
 	backend.Send(&pgproto3.AuthenticationCleartextPassword{})
 	if err := backend.Flush(); err != nil {
-		return fmt.Errorf(ErrClearTextAuthChallengeSend.Error(), err)
+		return fmt.Errorf("%w: %w", ErrClearTextAuthChallengeSend, err)
 	}
 
 	// recv the clear text credentials
 	msg, err := backend.Receive()
 	if err != nil {
-		return fmt.Errorf(ErrClearTextAuthRead.Error(), err)
+		return fmt.Errorf("%w: %w", ErrClearTextAuthRead, err)
 	}
 
 	// get the password from clear text msg
 	pwMsg, ok := msg.(*pgproto3.PasswordMessage)
 	if !ok {
-		return fmt.Errorf(ErrClearTextAuthUnexpectedFormat.Error(), msg)
+		return fmt.Errorf("%w: %T", ErrClearTextAuthUnexpectedFormat, msg)
 	}
 
 	if pwMsg.Password != entry.Password {
-		return fmt.Errorf(ErrClearTextAuthInvalidPassword.Error(), entry.Username)
+		return fmt.Errorf("%w: user=%s", ErrClearTextAuthInvalidPassword, entry.Username)
 	}
 
 	// auth succeded
@@ -176,31 +175,31 @@ func authMD5(backend *pgproto3.Backend, entry config.User) error {
 	// generate random salt
 	var salt [4]byte
 	if _, err := rand.Read(salt[:]); err != nil {
-		return fmt.Errorf(ErrMD5AuthSaltGen.Error(), err)
+		return fmt.Errorf("%w: %w", ErrMD5AuthSaltGen, err)
 	}
 
 	// send
 	backend.Send(&pgproto3.AuthenticationMD5Password{Salt: salt})
 	if err := backend.Flush(); err != nil {
-		return fmt.Errorf(ErrMD5AuthChallengeSend.Error(), err)
+		return fmt.Errorf("%w: %w", ErrMD5AuthChallengeSend, err)
 	}
 
 	// read client's hashed response
 	msg, err := backend.Receive()
 	if err != nil {
-		return fmt.Errorf(ErrMD5AuthRead.Error(), err)
+		return fmt.Errorf("%w: %w", ErrMD5AuthRead, err)
 	}
 
 	pwMsg, ok := msg.(*pgproto3.PasswordMessage)
 	if !ok {
-		return fmt.Errorf(ErrMD5AuthUnexpectedFormat.Error(), msg)
+		return fmt.Errorf("%w: %T", ErrMD5AuthUnexpectedFormat, msg)
 	}
 
 	// compute hash's value, will later be comapred with received hash
 	expectedHash := md5Password(entry.Password, entry.Username, salt[:])
 
 	if pwMsg.Password != expectedHash {
-		return fmt.Errorf(ErrMD5AuthInvalidCredentials.Error(), entry.Username)
+		return fmt.Errorf("%w: user=%s", ErrMD5AuthInvalidCredentials, entry.Username)
 	}
 
 	return nil
@@ -258,22 +257,22 @@ func authSCRAM(backend *pgproto3.Backend, entry config.User) error {
 		AuthMechanisms: []string{"SCRAM-SHA-256"},
 	})
 	if err := backend.Flush(); err != nil {
-		return fmt.Errorf(ErrSCRAMAuthChallengeSend.Error(), err)
+		return fmt.Errorf("%w: %w", ErrSCRAMAuthChallengeSend, err)
 	}
 
 	// Round 1: read client-first-message
 	msg, err := backend.Receive()
 	if err != nil {
-		return fmt.Errorf(ErrSCRAMAuthRead.Error(), err)
+		return fmt.Errorf("%w: %w", ErrSCRAMAuthRead, err)
 	}
 
 	saslInit, ok := msg.(*pgproto3.SASLInitialResponse)
 	if !ok {
-		return fmt.Errorf(ErrSCRAMAuthUnexpectedFormat.Error(), msg)
+		return fmt.Errorf("%w: %T", ErrSCRAMAuthUnexpectedInitFormat, msg)
 	}
 
 	if saslInit.AuthMechanism != "SCRAM-SHA-256" {
-		return fmt.Errorf(ErrSCRAMAuthUnexpectedMethod.Error(), saslInit.AuthMechanism)
+		return fmt.Errorf("%w: %s", ErrSCRAMAuthUnexpectedMethod, saslInit.AuthMechanism)
 	}
 
 	// Parse client-first-message: "n,,n=<user>,r=<clientNonce>"
@@ -281,7 +280,7 @@ func authSCRAM(backend *pgproto3.Backend, entry config.User) error {
 	clientFirst := string(saslInit.Data)
 	clientFirstBare, clientNonce, err := parseClientFirst(clientFirst)
 	if err != nil {
-		return fmt.Errorf("scram: parse client-first: %w", err)
+		return fmt.Errorf("%w: %w", ErrSCRAMAuthParseClientFirst, err)
 	}
 
 	// Round 2: send server-first-message, read client-final-message
@@ -289,14 +288,14 @@ func authSCRAM(backend *pgproto3.Backend, entry config.User) error {
 	// Generate server nonce = clientNonce + random suffix.
 	serverNonceSuffix := make([]byte, 18)
 	if _, err := rand.Read(serverNonceSuffix); err != nil {
-		return fmt.Errorf("catfish/proxy : scram nonce generation failed ", err)
+		return fmt.Errorf("%w: %w", ErrSCRAMAuthNonceGen, err)
 	}
 	serverNonce := clientNonce + base64.StdEncoding.EncodeToString(serverNonceSuffix)
 
 	// generate suffix
 	salt := make([]byte, 16)
 	if _, err := rand.Read(salt); err != nil {
-		return fmt.Errorf("catfish/proxy : scram salt generation error ", err)
+		return fmt.Errorf("%w: %w", ErrSCRAMAuthSaltGen, err)
 	}
 	saltB64 := base64.StdEncoding.EncodeToString(salt)
 
@@ -307,24 +306,24 @@ func authSCRAM(backend *pgproto3.Backend, entry config.User) error {
 		Data: []byte(serverFirst),
 	})
 	if err := backend.Flush(); err != nil {
-		return fmt.Errorf("catfish/proxy : scram send server-first ", err)
+		return fmt.Errorf("%w: %w", ErrSCRAMAuthServerFirstSend, err)
 	}
 
 	// reads client's final msg
 	msg, err = backend.Receive()
 	if err != nil {
-		return fmt.Errorf("catfish/proxy : scram read client-final ", err)
+		return fmt.Errorf("%w: %w", ErrSCRAMAuthClientReadFinal, err)
 	}
 
 	saslResponse, ok := msg.(*pgproto3.SASLResponse)
 	if !ok {
-		return fmt.Errorf("catfish/proxy : scram unexpected SASLResponse ", msg)
+		return fmt.Errorf("%w: %T", ErrSCRAMAuthUnexpectedResponseFormat, msg)
 	}
 
 	// Parse client-final: "c=<binding>,r=<fullNonce>,p=<clientProof>"
 	clientFinalWithoutProof, clientProofB64, err := parseClientFinal(string(saslResponse.Data), serverNonce)
 	if err != nil {
-		return fmt.Errorf("scram: parse client-final: %w", err)
+		return fmt.Errorf("%w: %w", ErrSCRAMAuthParseClientFinal, err)
 	}
 
 	// Verify client proof
@@ -354,11 +353,11 @@ func authSCRAM(backend *pgproto3.Backend, entry config.User) error {
 
 	clientProof, err := base64.StdEncoding.DecodeString(clientProofB64)
 	if err != nil {
-		return fmt.Errorf("scram: decode client proof: %w", err)
+		return fmt.Errorf("%w: %w", ErrSCRAMAuthDecodeClientProof, err)
 	}
 
 	if !hmac.Equal(clientProof, expectedProof) {
-		return fmt.Errorf("scram: wrong password for user %q", entry.Username)
+		return fmt.Errorf("%w: %q", ErrSCRAMAuthWrongPassword, entry.Username)
 	}
 
 	// Round 3: send server signature (proves server also knows the password)
@@ -371,7 +370,7 @@ func authSCRAM(backend *pgproto3.Backend, entry config.User) error {
 		Data: []byte(serverFinal),
 	})
 	if err := backend.Flush(); err != nil {
-		return fmt.Errorf("scram: send server-final: %w", err)
+		return fmt.Errorf("%w: %w", ErrSCRAMAuthServerFinalSend, err)
 	}
 
 	return nil

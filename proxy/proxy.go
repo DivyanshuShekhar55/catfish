@@ -16,31 +16,41 @@ import (
 )
 
 var (
-	ErrPoolCreation                    error = errors.New("catfish/proxy : error creating pool, closing all pools ")
-	ErrProxyTcpLlistener               error = errors.New("catfish/proxy : error starting tcp listener ")
-	ErrReadStartupMsg                  error = errors.New("catfish/proxy : error reading auth stratup msg ")
-	ErrReadStartupMsgAfterSSLDecline   error = errors.New("catfish/proxy : error reading auth stratup msg after SSL declined ")
-	ErrStartupMsgUnexpectedFormat      error = errors.New("catfish/proxy : unexpected startup message ")
-	ErrAuthFailed                      error = errors.New("catfish/proxy : authentication failed ")
-	ErrUnknownUser                     error = errors.New("catfish/proxy : Unknown User ")
-	ErrDatabaseConnectionNotConfigured error = errors.New("catfish/proxy : user not configured to connect to this database ")
-	ErrClearTextAuthChallengeSend      error = errors.New("catfish/proxy : error during sending clear text challenge to user ")
-	ErrClearTextAuthRead               error = errors.New("catfish/proxy : error reading response ")
-	ErrClearTextAuthUnexpectedFormat   error = errors.New("catfish/proxy : cleartext unexpected PasswordMessage format ")
-	ErrClearTextAuthInvalidPassword    error = errors.New("catfish.proxy : wrong password ")
-	ErrMD5AuthSaltGen                  error = errors.New("catfish/proxy : md5 salt generation error ")
-	ErrMD5AuthChallengeSend            error = errors.New("catfish/proxy : md5 send challenge ")
-	ErrMD5AuthRead                     error = errors.New("catfish/proxy : md5 read response error ")
-	ErrMD5AuthUnexpectedFormat         error = errors.New("catfish/proxy : md5 unexpected PasswordMessage format ")
-	ErrMD5AuthInvalidCredentials       error = errors.New("catfish/proxy : md5 wrong credentials for user ")
-	ErrSCRAMAuthChallengeSend          error = errors.New("catfish/proxy : scram send mechanism list ")
-	ErrSCRAMAuthRead                   error = errors.New("catfish/proxy : scram auth read error ")
-	ErrSCRAMAuthUnexpectedFormat       error = errors.New("catfish/proxy : unexpected SASLInitResponse ")
-	ErrSCRAMAuthUnexpectedMethod       error = errors.New("catfish/proxy : client chose unexpected mechanism scram ")
-	ErrUnknownAuthMethod               error = errors.New("catfish/proxy : unknown auth method ")
-	ErrAuthOKSend                      error = errors.New("catfish/proxy : error sending AuthenticationOk msg ")
-	ErrParameterStatusSend             error = errors.New("catfish/proxy : error sending parameter statuses by server ")
-	ErrReadyForQuerySend               error = errors.New("catfish/proxy : error sending ReadyForQuery msg ")
+	ErrPoolCreation                      error = errors.New("catfish/proxy : error creating pool, closing all pools ")
+	ErrProxyTcpLlistener                 error = errors.New("catfish/proxy : error starting tcp listener ")
+	ErrReadStartupMsg                    error = errors.New("catfish/proxy : error reading auth stratup msg ")
+	ErrReadStartupMsgAfterSSLDecline     error = errors.New("catfish/proxy : error reading auth stratup msg after SSL declined ")
+	ErrStartupMsgUnexpectedFormat        error = errors.New("catfish/proxy : unexpected startup message ")
+	ErrAuthFailed                        error = errors.New("catfish/proxy : authentication failed ")
+	ErrUnknownUser                       error = errors.New("catfish/proxy : unknown user ")
+	ErrDatabaseConnectionNotConfigured   error = errors.New("catfish/proxy : user not configured to connect to this database ")
+	ErrClearTextAuthChallengeSend        error = errors.New("catfish/proxy : error during sending clear text challenge to user ")
+	ErrClearTextAuthRead                 error = errors.New("catfish/proxy : error reading response ")
+	ErrClearTextAuthUnexpectedFormat     error = errors.New("catfish/proxy : cleartext unexpected PasswordMessage format ")
+	ErrClearTextAuthInvalidPassword      error = errors.New("catfish.proxy : wrong password ")
+	ErrMD5AuthSaltGen                    error = errors.New("catfish/proxy : md5 salt generation error ")
+	ErrMD5AuthChallengeSend              error = errors.New("catfish/proxy : md5 send challenge ")
+	ErrMD5AuthRead                       error = errors.New("catfish/proxy : md5 read response error ")
+	ErrMD5AuthUnexpectedFormat           error = errors.New("catfish/proxy : md5 unexpected PasswordMessage format ")
+	ErrMD5AuthInvalidCredentials         error = errors.New("catfish/proxy : md5 wrong credentials for user ")
+	ErrSCRAMAuthChallengeSend            error = errors.New("catfish/proxy : scram send mechanism list ")
+	ErrSCRAMAuthRead                     error = errors.New("catfish/proxy : scram auth read error ")
+	ErrSCRAMAuthUnexpectedInitFormat     error = errors.New("catfish/proxy : unexpected SASLInitResponse ")
+	ErrSCRAMAuthUnexpectedMethod         error = errors.New("catfish/proxy : client chose unexpected mechanism scram ")
+	ErrSCRAMAuthNonceGen                 error = errors.New("catfish/proxy : scram nonce generation failed ")
+	ErrSCRAMAuthSaltGen                  error = errors.New("catfish/proxy : scram salt generation error ")
+	ErrSCRAMAuthServerFirstSend          error = errors.New("catfish/proxy : scram send server-first ")
+	ErrSCRAMAuthClientReadFinal          error = errors.New("catfish/proxy : scram read client-final ")
+	ErrSCRAMAuthUnexpectedResponseFormat error = errors.New("catfish/proxy : scram unexpected SASLResponse ")
+	ErrSCRAMAuthParseClientFirst         error = errors.New("catfish/proxy : scram parse client-first ")
+	ErrSCRAMAuthParseClientFinal         error = errors.New("catfish/proxy : scram parse client-final ")
+	ErrSCRAMAuthDecodeClientProof        error = errors.New("catfish/proxy : scram decode client proof ")
+	ErrSCRAMAuthWrongPassword            error = errors.New("catfish/proxy : scram wrong password for user ")
+	ErrSCRAMAuthServerFinalSend          error = errors.New("catfish/proxy : scram send server-final ")
+	ErrUnknownAuthMethod                 error = errors.New("catfish/proxy : unknown auth method ")
+	ErrAuthOKSend                        error = errors.New("catfish/proxy : error sending AuthenticationOk msg ")
+	ErrParameterStatusSend               error = errors.New("catfish/proxy : error sending parameter statuses by server ")
+	ErrReadyForQuerySend                 error = errors.New("catfish/proxy : error sending ReadyForQuery msg ")
 
 	ErrCodeAuthFailed string = "28P01"
 )
@@ -91,7 +101,7 @@ func New(ctx context.Context, cfg *config.Config, semaphore *backpressure.Semaph
 				existing.Close()
 			}
 
-			return nil, fmt.Errorf(ErrPoolCreation.Error(), user.Username, user.Database, err)
+			return nil, fmt.Errorf("%w: user=%s db=%s: %w", ErrPoolCreation, user.Username, user.Database, err)
 		}
 
 		// all good, add to pools
@@ -133,7 +143,7 @@ func New(ctx context.Context, cfg *config.Config, semaphore *backpressure.Semaph
 func (s *CatfishServer) Listen() error {
 	ln, err := net.Listen("tcp", s.config.ListenerAddr)
 	if err != nil {
-		return fmt.Errorf(ErrProxyTcpLlistener.Error(), s.config.ListenerAddr, err)
+		return fmt.Errorf("%w: addr=%s: %w", ErrProxyTcpLlistener, s.config.ListenerAddr, err)
 	}
 
 	s.clientListener = ln
@@ -145,7 +155,7 @@ func (s *CatfishServer) Listen() error {
 			case <-s.done:
 				return nil
 			default:
-				return fmt.Errorf(ErrProxyTcpLlistener.Error(), err)
+				return fmt.Errorf("%w: %w", ErrProxyTcpLlistener, err)
 
 			}
 		}
