@@ -309,7 +309,7 @@ func (s *CatfishServer) clientLoop(
 
 		switch m := msg.(type) {
 		case *pgproto3.Query:
-			s.handleQuery(backend, frontend, m, clientState) // actual work
+			s.handleQuery(ctx, backend, frontend, m, clientState) // actual work
 			// above one blocks until response is fully streamed back
 		case *pgproto3.Terminate:
 			frontend.Send(m) // tell postgres server goodbye too
@@ -352,17 +352,50 @@ func (s *CatfishServer) clientLoop(
 }
 
 func (s *CatfishServer) handleQuery(
+	ctx context.Context,
 	backend *pgproto3.Backend,
 	frontend *pgproto3.Frontend,
 	msg *pgproto3.Query,
 	clientState *clientState,
 ) {
-	ctx := context.Background()
 
-	// acquire a semaphore slot for this user's tier
-	if err := s.semaphore.Acquire(ctx, 1, s.tierIndex[clientState.tier]); err != nil {
-
+	// look up the priority index for this client's tier
+	// eg. tier name "critical" → index 0 (highest priority in semaphore)
+	targetPriority, ok := s.tierIndex[clientState.tier]
+	if !ok {
+		// tier name not found
+		// ideally this should not happen as it was already handled in doAuth()
+		// fallback to lowest priority
+		targetPriority = len(s.tierIndex) - 1
 	}
+
+	// acquire a semaphore slot — blocks if all slots are busy
+	// ctx cancels if client disconnects while waiting in queue
+	// returns error if: dropped by CoDel, queue full, or ctx cancelled
+	// stream result back if accepted and run
+	if err := s.semaphore.Acquire(ctx, 1, targetPriority); err != nil {
+		sendError(backend, ErrCodeTooBusy, "catfish : too busy now, try again later")
+		sendReadyForQuery(backend, clientState.txStatus)
+		return
+	}
+
+	// always release the slot when query is done, regardless of outcome
+	defer s.semaphore.Release(1)
+
+	// mark query as in-progress so clientLoop's disconnect handler knows to cancel
+	clientState.queryInProgress = true
+
+	// forward query to real postgres
+	frontend.Send(msg)
+	if err := frontend.Flush(); err != nil {
+		sendError(backend, ErrCodeConnFailed, ErrQueryForward.Error()+": "+err.Error())
+		clientState.queryInProgress = false
+		return
+	}
+
+	// all went well, stream response back to user
+	s.streamResponse(backend, frontend, clientState)
+
 }
 
 // parses the DSN string ( e.g., postgres://user:pass@myhost:5433/mydb) using pgx's built-in parser,
@@ -439,5 +472,60 @@ func (s *CatfishServer) relayUntilReady(
 			backend.Flush() // flush all at once
 			return nil
 		}
+	}
+}
+
+// streamResponse — forward postgres response messages to app
+// streamResponse reads postgres response messages one by one and forwards
+// each to the app. Runs until ReadyForQuery arrives, which signals the query
+// is fully complete. Updates state.txStatus from ReadyForQuery for free.
+func (s *CatfishServer) streamResponse(
+	backend *pgproto3.Backend,
+	frontend *pgproto3.Frontend,
+	clientState *clientState,
+) {
+	for {
+		msg, err := frontend.Receive()
+		if err != nil {
+			// lost connection to postgres mid-response
+			sendError(backend, ErrCodeConnFailed, ErrPostgresRead.Error())
+			clientState.queryInProgress = false
+			return
+		}
+
+		switch m := msg.(type) {
+		case *pgproto3.RowDescription:
+			// column names and types — sent once before DataRows\
+			backend.Send(m)
+		case *pgproto3.DataRow:
+			// one row of data — forward immediately (streaming, not buffering)
+			backend.Send(m)
+			backend.Flush()
+		// TODO : send error and flush or not here what immediate means ??
+		case *pgproto3.CommandComplete:
+			// query finished on postgres side e.g. "SELECT 42" or "UPDATE 3"
+			backend.Send(m)
+		case *pgproto3.ReadyForQuery:
+			// postgres is done and ready for next query
+			// TxStatus tells us current transaction state for free — 'I', 'T', or 'E'
+			clientState.txStatus = m.TxStatus
+			clientState.queryInProgress = false
+			backend.Send(m)
+			backend.Flush() // flush everything buffered since the query started
+			return          // query done — back to clientLoop
+		case *pgproto3.ErrorResponse:
+			// postgres returned an error — forward it but keep going
+			// ReadyForQuery still arrives after an error
+			backend.Send(m)
+		case *pgproto3.NoticeResponse:
+			// non-fatal notice (e.g. deprecated syntax warning) — forward
+			backend.Send(m)
+		default:
+			// EmptyQueryResponse, CopyData, CopyDone, etc. — forward blindly
+			if bm, ok := msg.(pgproto3.BackendMessage); ok {
+				backend.Send(bm)
+			}
+		}
+
 	}
 }
