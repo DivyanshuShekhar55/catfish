@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"sync"
 	"time"
@@ -51,8 +52,15 @@ var (
 	ErrAuthOKSend                        error = errors.New("catfish/proxy : error sending AuthenticationOk msg ")
 	ErrParameterStatusSend               error = errors.New("catfish/proxy : error sending parameter statuses by server ")
 	ErrReadyForQuerySend                 error = errors.New("catfish/proxy : error sending ReadyForQuery msg ")
+	ErrPoolNotFound                      error = errors.New("catfish/proxy : no pool found for user/database pair")
+	ErrPoolAcquire                       error = errors.New("catfish/proxy : failed to acquire connection from pool")
+	ErrQueryForward                      error = errors.New("catfish/proxy : failed to forward query to postgres")
+	ErrPostgresRead                      error = errors.New("catfish/proxy : lost connection to postgres mid-response")
 
 	ErrCodeAuthFailed string = "28P01"
+	ErrCodeTooBusy           = "53300"
+	ErrCodeNoPool            = "3D000"
+	ErrCodeConnFailed        = "08006"
 )
 
 // use the close once function, so multiple goroutines do not call close at the same time.
@@ -63,12 +71,12 @@ type CatfishServer struct {
 	pools             map[string]*pool.Pool // we will have one pool per user-db pair
 	parameterStatuses map[string]string     // used after user authenticates succesfully, sends these statuses
 	semaphore         *backpressure.Semaphore
-
-	userIndex      map[string]config.User
-	clientListener net.Listener
-	wg             sync.WaitGroup
-	closeOnce      sync.Once
-	done           chan struct{}
+	userIndex         map[string]config.User // fast lookup by username
+	tierIndex         map[string]int         // tier name to semaphore index
+	clientListener    net.Listener
+	wg                sync.WaitGroup
+	closeOnce         sync.Once
+	done              chan struct{}
 }
 
 func New(ctx context.Context, cfg *config.Config, semaphore *backpressure.Semaphore) (*CatfishServer, error) {
@@ -130,6 +138,12 @@ func New(ctx context.Context, cfg *config.Config, semaphore *backpressure.Semaph
 		}
 	}
 
+	// tiers in config are ordered highest → lowest priority, matching semaphore index 0, 1, 2...
+	tierIndex := make(map[string]int, len(cfg.Tiers))
+	for i, tier := range cfg.Tiers {
+		tierIndex[tier.Name] = i
+	}
+
 	return &CatfishServer{
 		config:            cfg,
 		pools:             pools,
@@ -153,6 +167,7 @@ func (s *CatfishServer) Listen() error {
 		if err != nil {
 			select {
 			case <-s.done:
+				// no error, Close() was called, clean shutdown
 				return nil
 			default:
 				return fmt.Errorf("%w: %w", ErrProxyTcpLlistener, err)
@@ -212,8 +227,8 @@ type clientState struct {
 	tier            string
 	queryInProgress bool   // is there any running query, not finished yet (used during flush logic in pooler)
 	txStatus        byte   // 'I'(idle), 'E'(error), 'T'(in tx), used in pooler afterRelease logic
-	backendPID      uint32 // to track and cancel
-	backendSecret   uint32
+	backendPID      uint32 // to track and cancel pg process
+	backendSecret   uint32 // cancel secret, paired with backendPID
 }
 
 // after it is accepted by our server
@@ -222,12 +237,20 @@ func (s *CatfishServer) handleClient(appConn net.Conn) {
 	defer appConn.Close()
 
 	// backend reads messages FROM the app (app is the client/frontend).
+	// will also write responses to the app
 	backend := pgproto3.NewBackend(appConn, appConn)
-	//clientState := &clientState{txStatus: 'I'}
 
-	// Step 1: auth —
+	// create a fresh state for this client — populated during doAuth
 	// every client accepted through Tcp gets its own new clientState
-	err := s.doAuth(backend, appConn, &clientState{})
+	clientState := &clientState{}
+
+	// one context per client connection lifetime
+	// cancels automatically when this function returns (i.e., when client disconnects)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	//	step 1 : auth —
+	err := s.doAuth(backend, appConn, clientState)
 	if err != nil {
 		sendError(backend, ErrCodeAuthFailed, ErrAuthFailed.Error()+err.Error())
 		// since this client failed to authenticate, we can run other queries here
@@ -235,12 +258,98 @@ func (s *CatfishServer) handleClient(appConn net.Conn) {
 		return
 	}
 
-	// TODO : COME BACK AFTER FINISHING AUTH
-	// HEHEHE ... I AM HERE FINALLY
+	// step 2 : find pool for this user
+	// from the auth function the client state fields have been populated
+	pool, ok := s.pools[poolKey(clientState.username, clientState.database)]
+	if !ok {
+		sendError(backend, ErrCodeNoPool, fmt.Sprintf("%s: user%s, db:%s", ErrPoolNotFound.Error(), clientState.username, clientState.database))
+		sendReadyForQuery(backend, 'I')
+		return
+	}
 
-	// get the pool for this (user,db) pair
-	//p, ok := s.pools
+	// step 3: hold one raw postgres connection for this client's entire session
+	// WithConn blocks here until clientLoop returns (i.e. client disconnects)
+	// when clientLoop returns → fn returns → WithConn releases conn back to pool
+	// note that backend talks via the appConn (received from ttcp.listen)
+	// frontend talks via rawConn (one created from a acquired pool, the WithConn creates that)
+	if err := pool.WithConn(ctx, func(rawConn net.Conn) error {
+		frontend := pgproto3.NewFrontend(rawConn, rawConn)
+		// step 4 : handle queries
+		s.clientLoop(ctx, backend, frontend, clientState)
+		return nil
+	}); err != nil {
+		// only reaches here if Acquire itself failed, not if client disconnected
+		sendError(backend, ErrCodeConnFailed, ErrPoolAcquire.Error()+": "+err.Error())
+		sendReadyForQuery(backend, 'I')
+	}
 
+}
+
+// client loop
+func (s *CatfishServer) clientLoop(
+	ctx context.Context,
+	backend *pgproto3.Backend,
+	frontend *pgproto3.Frontend,
+	clientState *clientState,
+) {
+	for {
+		// wait till any app sends a message
+		msg, err := backend.Receive()
+		if err != nil {
+			if isClosedErr(err) && clientState.queryInProgress {
+				// app disconnected mid-query, cleanup
+				// TODO : pg_cancel_backend via cancel pool.
+				// for now: closing pgxConn (via defer Release in handleClient)
+				// causes postgres to notice the disconnect and clean up eventually
+				
+			}
+			
+			return // any error = connection dead, exit goroutine
+		}
+
+		switch m := msg.(type) {
+		case *pgproto3.Query:
+			s.handleQuery(backend, frontend, m, clientState) // actual work 
+			// above one blocks until response is fully streamed back
+		case *pgproto3.Terminate:
+			frontend.Send(m) // tell postgres server goodbye too
+			frontend.Flush()
+			return           // clean exit
+
+		default:
+			// extended query protocol (Parse/Bind/Execute) or anything else
+			// we don't inspect — forward blindly and relay whatever postgres says back
+			if frontendMsg, ok := msg.(pgproto3.FrontendMessage); ok {
+				// just forward to backend
+				frontend.Send(frontendMsg)
+				if err := frontend.Flush(); err != nil {
+					return
+				}
+			}
+			// Postgres sends back multiple response messages for each of those frontend.Send() — and you need to forward ALL of them back to the app
+
+			// relay response back to frontend until ReadyForQuery msg pops up
+			if err := s.relayUntilReady(backend, frontend, clientState); err != nil {
+				return
+			}
+
+		}
+	}
+
+}
+
+func (s *CatfishServer) handleQuery(
+	backend *pgproto3.Backend,
+	frontend *pgproto3.Frontend,
+	msg *pgproto3.Query,
+	clientState *clientState,
+) {
+	ctx := context.Background()
+
+	// acquire a semaphore slot for this user's tier
+	if err := s.semaphore.Acquire(ctx, 1, s.tierIndex[clientState.tier]); err != nil {
+
+	}
 }
 
 // parses the DSN string ( e.g., postgres://user:pass@myhost:5433/mydb) using pgx's built-in parser,
@@ -273,4 +382,48 @@ func sendError(backend *pgproto3.Backend, code, message string) {
 func sendReadyForQuery(backend *pgproto3.Backend, txStatus byte) {
 	backend.Send(&pgproto3.ReadyForQuery{TxStatus: txStatus})
 	backend.Flush() // ignore error, best effort
+}
+
+// isClosedErr returns true if the error represents a normal connection close
+// rather than an unexpected failure. Used to distinguish clean disconnects
+// from real errors in clientLoop.
+func isClosedErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	// normal TCP close — client called conn.Close() or process exited
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
+	// network-level error (connection reset, broken pipe, etc.)
+	var netErr *net.OpError
+	if errors.As(err, &netErr) {
+		return !netErr.Temporary()
+	}
+	return false
+}
+
+// if its not a simple uqery we keep forwarding messages until its over
+// make a loop that just checks what type of data it is
+// and forwards it properly
+func (s *CatfishServer) relayUntilReady (
+	backend *pgproto3.Backend,
+	frontend *pgproto3.Frontend,
+	clientState *clientState,
+) error {
+	for {
+		msg, err := frontend.Receive() // read from postgres
+		if err != nil {
+			return err
+		}
+		if backendMsg, ok := msg.(pgproto3.BackendMessage);ok {
+			backend.Send(backendMsg) // forward to app/frontend 'msg'
+		}
+		// ReadyForQuery signals end of this command — update txStatus and return
+		if rfq, ok := msg.(*pgproto3.ReadyForQuery); ok {
+			clientState.txStatus = rfq.TxStatus
+			backend.Flush()
+			return nil 
+		}
+	}
 }

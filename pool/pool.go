@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -235,6 +236,24 @@ func (p *Pool) ParameterStatuses(ctx context.Context) (map[string]string, error)
 	}
 
 	return statuses, nil
+}
+
+// WithConn acquires a connection, calls fn with the underlying net.Conn,
+// and releases it when fn returns.
+// creating this was necessary so we can call frontend's queries
+// without exposing any acquire method
+func (p *Pool) WithConn(ctx context.Context, fn func(net.Conn) error) error {
+	conn, err := p.inner.Acquire(ctx)
+	if err != nil {
+		return fmt.Errorf("catfish/pool : acquire error :%w", err)
+	}
+	defer conn.Release()
+
+	// get the raw connection from this conn
+	pgxConn := conn.Conn().PgConn()
+	// get the raw net conn
+	netConn := pgxConn.Conn()
+	return fn(netConn)
 }
 
 // warm blocks until the pool has at least MinConns idle connections or ctx
