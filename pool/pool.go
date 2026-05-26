@@ -11,6 +11,10 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+var (
+	ErrConnAcquire error = errors.New("catfish/pool : error acquiring a connection from the pool")
+)
+
 type Config struct {
 	DSN                 string
 	minConns            int32
@@ -193,6 +197,42 @@ func (p *Pool) BeginTx(ctx context.Context, opts pgx.TxOptions) (pgx.Tx, error) 
 
 	// Wrap so we release the connection after commit or rollback.
 	return &autoReleaseTx{Tx: tx, conn: conn}, nil
+}
+
+// returns the parameter status values from the connected server
+// this is used once when user passes auth in the proxy layer
+// and has to be returned these status values
+func (p *Pool) ParameterStatuses(ctx context.Context) (map[string]string, error) {
+
+	statuses := make(map[string]string)
+
+	conn, err := p.inner.Acquire(ctx)
+	if err != nil {
+		return nil, errors.Join(ErrConnAcquire, err)
+	}
+	defer conn.Release()
+
+	// Access the underlying *pgx.Conn and get parameter statuses
+	pgxConn := conn.Conn()
+
+	// Get specific parameter statuses
+	params := []string{
+		"server_version",
+		"server_encoding",
+		"client_encoding",
+		"default_transaction_read_only",
+		"in_hot_standby",
+		"integer_datetimes",
+		"TimeZone",
+		"DateStyle",
+	}
+
+	for _, param := range params {
+		value := pgxConn.PgConn().ParameterStatus(param)
+		statuses[param] = value
+	}
+
+	return statuses, nil
 }
 
 // warm blocks until the pool has at least MinConns idle connections or ctx
