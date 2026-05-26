@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net"
 	"strings"
@@ -35,7 +36,7 @@ const (
 // populates clientState, and sends AuthenticationOK + ReadyForQuery on success.
 // doAuth relays the entire Postgres auth conversation between app and Postgres.
 
-func (s *CatfishServer) doAuth(backend *pgproto3.Backend, appConn net.Conn) error {
+func (s *CatfishServer) doAuth(backend *pgproto3.Backend, appConn net.Conn, clientState *clientState) error {
 	// 1. read startup msg from app
 	startupMsg, err := backend.ReceiveStartupMessage()
 	if err != nil {
@@ -89,12 +90,47 @@ func (s *CatfishServer) doAuth(backend *pgproto3.Backend, appConn net.Conn) erro
 		if err := authClearText(backend, entry); err != nil {
 			return err
 		}
+	case AuthMD5:
+		if err := authMD5(backend, entry); err != nil {
+			return err
+		}
+	case AuthSCRAM:
+		if err := authSCRAM(backend, entry); err != nil {
+			return err
+		}
+	default:
+		return fmt.Errorf(ErrUnknownAuthMethod.Error(), username, database)
+
 	}
 
-	// Open raw TCP connection to real postgres now
-	// upto now we were handling the messages with the client
-	// auth ahead will just be blindly forwarded now
-	//pgConn, err := net.Dial("tcp", postgresAddr(s.config.PostgresDSN))
+	// set following fields in the state now for this user
+	clientState.username = username
+	clientState.database = database
+	clientState.tier = entry.Tier
+
+	// auth succeeded (idk it's succeeded or succeded)
+	// buffer the authOk msg
+	backend.Send(&pgproto3.AuthenticationOk{})
+
+	// Send a minimal set of ParameterStatus messages — clients expect these.
+	for name, val := range s.parameterStatuses {
+		backend.Send(&pgproto3.ParameterStatus{
+			Name:  name,
+			Value: val,
+		})
+	}
+	// flsuh all the statuses + authOK together
+	if err := backend.Flush(); err != nil {
+		return errors.Join(ErrParameterStatusSend, ErrAuthOKSend, err)
+	}
+
+	// send ready for query signal
+	// everything done now in this func ;)
+	backend.Send(&pgproto3.ReadyForQuery{TxStatus: 'I'})
+	if err := backend.Flush(); err != nil {
+		return errors.Join(ErrReadyForQuerySend, err)
+	}
+
 	return nil
 }
 
@@ -298,42 +334,42 @@ func authSCRAM(backend *pgproto3.Backend, entry config.User) error {
 		[]byte(entry.Password),
 		salt,
 		scramIterations,
-		32,        // SHA-256 output = 32 bytes
+		32, // SHA-256 output = 32 bytes
 		sha256.New,
 	)
 
 	clientKey := hmacSHA256(saltedPassword, []byte("Client Key"))
 	storedKey := sha256.Sum256(clientKey)
- 
+
 	// AuthMessage = clientFirstBare + "," + serverFirst + "," + clientFinalWithoutProof
 	authMessage := clientFirstBare + "," + serverFirst + "," + clientFinalWithoutProof
- 
+
 	clientSignature := hmacSHA256(storedKey[:], []byte(authMessage))
- 
+
 	// ClientProof = ClientKey XOR ClientSignature
 	expectedProof := make([]byte, len(clientKey))
 	for i := range clientKey {
 		expectedProof[i] = clientKey[i] ^ clientSignature[i]
 	}
- 
+
 	clientProof, err := base64.StdEncoding.DecodeString(clientProofB64)
 	if err != nil {
 		return fmt.Errorf("scram: decode client proof: %w", err)
 	}
- 
+
 	if !hmac.Equal(clientProof, expectedProof) {
 		return fmt.Errorf("scram: wrong password for user %q", entry.Username)
 	}
 
 	// Round 3: send server signature (proves server also knows the password)
- 
+
 	serverKey := hmacSHA256(saltedPassword, []byte("Server Key"))
 	serverSignature := hmacSHA256(serverKey, []byte(authMessage))
 	serverFinal := "v=" + base64.StdEncoding.EncodeToString(serverSignature)
- 
+
 	backend.Send(&pgproto3.AuthenticationSASLFinal{
 		Data: []byte(serverFinal),
-	}); 
+	})
 	if err := backend.Flush(); err != nil {
 		return fmt.Errorf("scram: send server-final: %w", err)
 	}

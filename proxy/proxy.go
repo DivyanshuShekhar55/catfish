@@ -39,6 +39,8 @@ var (
 	ErrSCRAMAuthUnexpectedMethod       error = errors.New("catfish/proxy : client chose unexpected mechanism scram ")
 	ErrUnknownAuthMethod               error = errors.New("catfish/proxy : unknown auth method ")
 	ErrAuthOKSend                      error = errors.New("catfish/proxy : error sending AuthenticationOk msg ")
+	ErrParameterStatusSend             error = errors.New("catfish/proxy : error sending parameter statuses by server ")
+	ErrReadyForQuerySend               error = errors.New("catfish/proxy : error sending ReadyForQuery msg ")
 
 	ErrCodeAuthFailed string = "28P01"
 )
@@ -119,11 +121,11 @@ func New(ctx context.Context, cfg *config.Config, semaphore *backpressure.Semaph
 	}
 
 	return &CatfishServer{
-		config:    cfg,
-		pools:     pools,
-		userIndex: userIndex,
-		semaphore: semaphore,
-		done:      make(chan struct{}),
+		config:            cfg,
+		pools:             pools,
+		userIndex:         userIndex,
+		semaphore:         semaphore,
+		done:              make(chan struct{}),
 		parameterStatuses: parameterStatuses,
 	}, nil
 }
