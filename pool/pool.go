@@ -229,7 +229,9 @@ func (p *Pool) ParameterStatuses(ctx context.Context) (map[string]string, error)
 
 	for _, param := range params {
 		value := pgxConn.PgConn().ParameterStatus(param)
-		statuses[param] = value
+		if value != "" {
+			statuses[param] = value
+		}
 	}
 
 	return statuses, nil

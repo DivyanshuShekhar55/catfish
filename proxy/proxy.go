@@ -37,6 +37,8 @@ var (
 	ErrSCRAMAuthRead                   error = errors.New("catfish/proxy : scram auth read error ")
 	ErrSCRAMAuthUnexpectedFormat       error = errors.New("catfish/proxy : unexpected SASLInitResponse ")
 	ErrSCRAMAuthUnexpectedMethod       error = errors.New("catfish/proxy : client chose unexpected mechanism scram ")
+	ErrUnknownAuthMethod               error = errors.New("catfish/proxy : unknown auth method ")
+	ErrAuthOKSend                      error = errors.New("catfish/proxy : error sending AuthenticationOk msg ")
 
 	ErrCodeAuthFailed string = "28P01"
 )
@@ -45,9 +47,10 @@ var (
 // Calling close() from multiple goroutines at the same time causes panic
 // which is against the graceful shutdown process
 type CatfishServer struct {
-	config    *config.Config
-	pools     map[string]*pool.Pool // we will have one pool per user-db pair
-	semaphore *backpressure.Semaphore
+	config            *config.Config
+	pools             map[string]*pool.Pool // we will have one pool per user-db pair
+	parameterStatuses map[string]string     // used after user authenticates succesfully, sends these statuses
+	semaphore         *backpressure.Semaphore
 
 	userIndex      map[string]config.User
 	clientListener net.Listener
@@ -59,6 +62,7 @@ type CatfishServer struct {
 func New(ctx context.Context, cfg *config.Config, semaphore *backpressure.Semaphore) (*CatfishServer, error) {
 	pools := make(map[string]*pool.Pool, len(cfg.Users))
 	userIndex := make(map[string]config.User, len(cfg.Users))
+	var parameterStatuses map[string]string
 
 	for _, user := range cfg.Users {
 		// we will create a key to identify an unique pair of user-db
@@ -91,6 +95,27 @@ func New(ctx context.Context, cfg *config.Config, semaphore *backpressure.Semaph
 		// all good, add to pools
 		pools[key] = p
 		userIndex[user.Username] = user
+
+		parameterStatuses, err = p.ParameterStatuses(ctx)
+		if err != nil {
+			continue
+			// i.e., leave this pool
+			// use the next pool in the loop to look for statuses
+		}
+	}
+
+	// store the server's parameter status
+	// this shall be used when we send response back to the client after auth finishes successfully
+	if parameterStatuses == nil {
+		// fallback — no pool responded, use safe defaults
+		// not a big enough error to panic i guess
+		parameterStatuses = map[string]string{
+			"server_version":    "15.0",
+			"client_encoding":   "UTF8",
+			"DateStyle":         "ISO, MDY",
+			"TimeZone":          "UTC",
+			"integer_datetimes": "on",
+		}
 	}
 
 	return &CatfishServer{
@@ -99,6 +124,7 @@ func New(ctx context.Context, cfg *config.Config, semaphore *backpressure.Semaph
 		userIndex: userIndex,
 		semaphore: semaphore,
 		done:      make(chan struct{}),
+		parameterStatuses: parameterStatuses,
 	}, nil
 }
 
@@ -167,7 +193,7 @@ func (s *CatfishServer) Close() {
 
 // CLIENT STATE
 // keep one instance per connected app, track the user/app
-
+// the fields will be populated only after being authenticated and checked
 type clientState struct {
 	username        string
 	database        string
@@ -187,16 +213,21 @@ func (s *CatfishServer) handleClient(appConn net.Conn) {
 	backend := pgproto3.NewBackend(appConn, appConn)
 	//clientState := &clientState{txStatus: 'I'}
 
-	// Step 1: auth — forward the full handshake to real Postgres.
-	err := s.doAuth(backend, appConn)
+	// Step 1: auth —
+	// every client accepted through Tcp gets its own new clientState
+	err := s.doAuth(backend, appConn, &clientState{})
 	if err != nil {
 		sendError(backend, ErrCodeAuthFailed, ErrAuthFailed.Error()+err.Error())
-		// since this client failed to
+		// since this client failed to authenticate, we can run other queries here
 		sendReadyForQuery(backend, 'I')
 		return
 	}
 
 	// TODO : COME BACK AFTER FINISHING AUTH
+	// HEHEHE ... I AM HERE FINALLY
+
+	// get the pool for this (user,db) pair
+	//p, ok := s.pools
 
 }
 
@@ -222,12 +253,12 @@ func sendError(backend *pgproto3.Backend, code, message string) {
 		Code:     code,
 		Message:  message,
 	})
-	backend.Flush(); // ignore error, best effort
+	backend.Flush() // ignore error, best effort
 }
 
 // sends a signal that next query can be run now
 // kinda like backend yelling "I am free now"
 func sendReadyForQuery(backend *pgproto3.Backend, txStatus byte) {
 	backend.Send(&pgproto3.ReadyForQuery{TxStatus: txStatus})
-	backend.Flush(); // ignore error, best effort
+	backend.Flush() // ignore error, best effort
 }
