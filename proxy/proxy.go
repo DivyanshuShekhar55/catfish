@@ -116,11 +116,15 @@ func New(ctx context.Context, cfg *config.Config, semaphore *backpressure.Semaph
 		pools[key] = p
 		userIndex[user.Username] = user
 
-		parameterStatuses, err = p.ParameterStatuses(ctx)
-		if err != nil {
-			continue
-			// i.e., leave this pool
-			// use the next pool in the loop to look for statuses
+		// if we received status from any pool, no need to refetch from another
+		if parameterStatuses == nil {
+			// haven't recv. status yet, try
+			parameterStatuses, err = p.ParameterStatuses(ctx)
+			if err != nil {
+				continue
+				// i.e., leave this pool
+				// use the next pool in the loop to look for statuses
+			}
 		}
 	}
 
@@ -151,6 +155,7 @@ func New(ctx context.Context, cfg *config.Config, semaphore *backpressure.Semaph
 		semaphore:         semaphore,
 		done:              make(chan struct{}),
 		parameterStatuses: parameterStatuses,
+		tierIndex:         tierIndex,
 	}, nil
 }
 
@@ -334,6 +339,11 @@ func (s *CatfishServer) clientLoop(
 					break            // PG will now respond
 				}
 
+				if _, ok := msg.(*pgproto3.Flush); ok {
+					frontend.Flush()
+					// don't break — Flush doesn't end the sequence, Sync does
+				}
+
 				// keep reading from app until we see Sync
 				msg, err = backend.Receive()
 				if err != nil {
@@ -499,9 +509,10 @@ func (s *CatfishServer) streamResponse(
 			backend.Send(m)
 		case *pgproto3.DataRow:
 			// one row of data — forward immediately (streaming, not buffering)
+			// for small data sets, as Figma says "P99 of our queries return fewer than 5 rows"
+			// so flushong all rows at once shouldn't cause any measurable latency issues
+			// hence no flush now
 			backend.Send(m)
-			backend.Flush()
-		// TODO : send error and flush or not here what immediate means ??
 		case *pgproto3.CommandComplete:
 			// query finished on postgres side e.g. "SELECT 42" or "UPDATE 3"
 			backend.Send(m)
