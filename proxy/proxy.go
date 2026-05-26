@@ -301,33 +301,46 @@ func (s *CatfishServer) clientLoop(
 				// TODO : pg_cancel_backend via cancel pool.
 				// for now: closing pgxConn (via defer Release in handleClient)
 				// causes postgres to notice the disconnect and clean up eventually
-				
+
 			}
-			
+
 			return // any error = connection dead, exit goroutine
 		}
 
 		switch m := msg.(type) {
 		case *pgproto3.Query:
-			s.handleQuery(backend, frontend, m, clientState) // actual work 
+			s.handleQuery(backend, frontend, m, clientState) // actual work
 			// above one blocks until response is fully streamed back
 		case *pgproto3.Terminate:
 			frontend.Send(m) // tell postgres server goodbye too
 			frontend.Flush()
-			return           // clean exit
+			return // clean exit
 
 		default:
 			// extended query protocol (Parse/Bind/Execute) or anything else
 			// we don't inspect — forward blindly and relay whatever postgres says back
-			if frontendMsg, ok := msg.(pgproto3.FrontendMessage); ok {
-				// just forward to backend
-				frontend.Send(frontendMsg)
-				if err := frontend.Flush(); err != nil {
+			// client sends multiple queries to pg
+			// then pg sends multiple to client
+			// first dump all app's msg with a loop, break when Sync point occurs
+			for {
+
+				if frontendMsg, ok := msg.(pgproto3.FrontendMessage); ok {
+					// keep buffering until finished
+					frontend.Send(frontendMsg)
+				}
+
+				if _, ok := msg.(*pgproto3.Sync); ok {
+					frontend.Flush() // now flush everything at once
+					break            // PG will now respond
+				}
+
+				// keep reading from app until we see Sync
+				msg, err = backend.Receive()
+				if err != nil {
 					return
 				}
 			}
 			// Postgres sends back multiple response messages for each of those frontend.Send() — and you need to forward ALL of them back to the app
-
 			// relay response back to frontend until ReadyForQuery msg pops up
 			if err := s.relayUntilReady(backend, frontend, clientState); err != nil {
 				return
@@ -403,10 +416,10 @@ func isClosedErr(err error) bool {
 	return false
 }
 
-// if its not a simple uqery we keep forwarding messages until its over
+// for extended query we keep forwarding messages from pg to app until its over
 // make a loop that just checks what type of data it is
 // and forwards it properly
-func (s *CatfishServer) relayUntilReady (
+func (s *CatfishServer) relayUntilReady(
 	backend *pgproto3.Backend,
 	frontend *pgproto3.Frontend,
 	clientState *clientState,
@@ -416,14 +429,15 @@ func (s *CatfishServer) relayUntilReady (
 		if err != nil {
 			return err
 		}
-		if backendMsg, ok := msg.(pgproto3.BackendMessage);ok {
-			backend.Send(backendMsg) // forward to app/frontend 'msg'
+		if backendMsg, ok := msg.(pgproto3.BackendMessage); ok {
+			// keep buffering until finished
+			backend.Send(backendMsg)
 		}
 		// ReadyForQuery signals end of this command — update txStatus and return
 		if rfq, ok := msg.(*pgproto3.ReadyForQuery); ok {
 			clientState.txStatus = rfq.TxStatus
-			backend.Flush()
-			return nil 
+			backend.Flush() // flush all at once
+			return nil
 		}
 	}
 }
