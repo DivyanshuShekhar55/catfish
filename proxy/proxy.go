@@ -54,7 +54,13 @@ func New(ctx context.Context, cfg *config.Config, semaphore *backpressure.Semaph
 
 		// create a new pool for this (user, db) pair
 		// TODO : set other parts of pool.Config too here
-		p, err := pool.New(ctx, pool.Config{DSN: dsn})
+		p, err := pool.New(ctx, pool.Config{
+			DSN: dsn,
+			MaxConns: cfg.Pool.MaxConns,
+			MinConns: cfg.Pool.MinConns,
+			MaxIdleTime: cfg.Pool.MaxConnIdleTime,
+			MaxConnTime: cfg.Pool.MaxConnLifetime,
+		})
 		if err != nil {
 			// close all other pools too
 			// TODO: IS IT A GOOD DECISION ?

@@ -14,29 +14,29 @@ import (
 
 type Config struct {
 	DSN                 string
-	minConns            int32
-	maxConns            int32
-	maxIdleTime         time.Duration
-	maxConnTime         time.Duration
-	drainRowsBeforeKill int32
+	MinConns            int32
+	MaxConns            int32
+	MaxIdleTime         time.Duration
+	MaxConnTime         time.Duration
+	DrainRowsBeforeKill int32
 }
 
 func (cfg *Config) SetDefault() {
-	if cfg.minConns == 0 {
-		cfg.minConns = 5
+	if cfg.MinConns == 0 {
+		cfg.MinConns = 5
 	}
-	if cfg.maxConns == 0 {
-		cfg.maxConns = 25
+	if cfg.MaxConns == 0 {
+		cfg.MaxConns = 25
 	}
 
-	if cfg.maxConnTime == 0 {
-		cfg.maxConnTime = 1 * time.Hour
+	if cfg.MaxConnTime == 0 {
+		cfg.MaxConnTime = 1 * time.Hour
 	}
-	if cfg.maxIdleTime == 0 {
-		cfg.maxIdleTime = 20 * time.Minute
+	if cfg.MaxIdleTime == 0 {
+		cfg.MaxIdleTime = 20 * time.Minute
 	}
-	if cfg.drainRowsBeforeKill == 0 {
-		cfg.drainRowsBeforeKill = 100
+	if cfg.DrainRowsBeforeKill == 0 {
+		cfg.DrainRowsBeforeKill = 100
 	}
 }
 
@@ -52,10 +52,10 @@ func New(ctx context.Context, cfg Config) (*Pool, error) {
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrParseConnectionString, err)
 	}
-	poolCfg.MaxConns = cfg.maxConns
-	poolCfg.MinConns = cfg.minConns
-	poolCfg.MaxConnLifetime = cfg.maxConnTime
-	poolCfg.MaxConnIdleTime = cfg.maxIdleTime
+	poolCfg.MaxConns = cfg.MaxConns
+	poolCfg.MinConns = cfg.MinConns
+	poolCfg.MaxConnLifetime = cfg.MaxConnTime
+	poolCfg.MaxConnIdleTime = cfg.MaxIdleTime
 
 	poolCfg.AfterRelease = func(conn *pgx.Conn) bool {
 		// true returns connection back to pool, false destroys it
@@ -72,7 +72,7 @@ func New(ctx context.Context, cfg Config) (*Pool, error) {
 		// rollback was success try to drain any unread rows
 		// if number of unread rows < drainRowsBeforeKill then read all (cheaper than kkilling the conn)
 		// else killing the conn and creating a newer one is cheaper
-		drained, err := drainRows(ctx, conn, cfg.drainRowsBeforeKill)
+		drained, err := drainRows(ctx, conn, cfg.DrainRowsBeforeKill)
 		if err != nil {
 			return false
 		}
@@ -265,7 +265,7 @@ func (p *Pool) warm(ctx context.Context) error {
 			return fmt.Errorf("%w: %w", ErrWarmCancelled, ctx.Err())
 		case <-ticker.C:
 			stat := p.inner.Stat()
-			if stat.IdleConns() >= p.config.minConns {
+			if stat.IdleConns() >= p.config.MinConns {
 				return nil
 			}
 		}

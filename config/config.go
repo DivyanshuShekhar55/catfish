@@ -16,8 +16,10 @@ type Config struct {
 	ShutdownTimeout time.Duration // duration after server shutdown, until which we wait for unfinished processes to sort out
 	// if they can't resolve, kill them forcefully
 
-	Tiers []Tier // must be arranged in higher to lower order
-	Users []User
+	Tiers         []Tier // must be arranged in higher to lower order
+	Users         []User
+	Pool          PoolConfig
+	MaxConcurrent int // max tokens available in the semaphore, so it is also num of concurrent ops
 }
 
 type Tier struct {
@@ -36,6 +38,13 @@ type User struct {
 	AuthMethod string // "cleartext", "md5" or "scram-sha-256"
 }
 
+type PoolConfig struct {
+	MinConns        int32
+	MaxConns        int32
+	MaxConnLifetime time.Duration
+	MaxConnIdleTime time.Duration
+}
+
 // reads a yaml config file and parses into the following structs:
 type File struct {
 	Listen          string        `yaml:"listen"`
@@ -44,6 +53,15 @@ type File struct {
 	ShutdownTimeout time.Duration `yaml:"shutdown_timeout"`
 	Tiers           []TierFile    `yaml:"tiers"`
 	Users           []UserFile    `yaml:"users"`
+	Pool            PoolFile      `yaml:"pool"`
+	MaxConcurrent   int           `yaml:"max_concurrent"`
+}
+
+type PoolFile struct {
+	MinConns        int32         `yaml:"min_conns"`
+	MaxConns        int32         `yaml:"max_conns"`
+	MaxConnLifetime time.Duration `yaml:"max_conn_lifetime"`
+	MaxConnIdleTime time.Duration `yaml:"max_conn_idle_time"`
 }
 
 type TierFile struct {
@@ -86,6 +104,15 @@ func Load(path string) (*Config, error) {
 		ShutdownTimeout: f.ShutdownTimeout,
 	}
 
+	cfg.Pool = PoolConfig{
+		MinConns:        f.Pool.MinConns,
+		MaxConns:        f.Pool.MaxConns,
+		MaxConnLifetime: f.Pool.MaxConnLifetime,
+		MaxConnIdleTime: f.Pool.MaxConnIdleTime,
+	}
+
+	cfg.MaxConcurrent = f.MaxConcurrent
+
 	// Apply defaults.
 	if cfg.ListenerAddr == "" {
 		cfg.ListenerAddr = ":6432"
@@ -95,6 +122,23 @@ func Load(path string) (*Config, error) {
 	}
 	if cfg.ShutdownTimeout == 0 {
 		cfg.ShutdownTimeout = 10 * time.Second
+	}
+
+	if cfg.Pool.MinConns == 0 {
+		cfg.Pool.MinConns = 5
+	}
+	if cfg.Pool.MaxConns == 0 {
+		cfg.Pool.MaxConns = 20
+	}
+	if cfg.Pool.MaxConnLifetime == 0 {
+		cfg.Pool.MaxConnLifetime = 1 * time.Hour
+	}
+	if cfg.Pool.MaxConnIdleTime == 0 {
+		cfg.Pool.MaxConnIdleTime = 30 * time.Minute
+	}
+
+	if cfg.MaxConcurrent == 0 {
+		cfg.MaxConcurrent = 20
 	}
 
 	// Copy tiers with defaults into config
@@ -160,5 +204,14 @@ func validate(f *File) error {
 			return fmt.Errorf("%w: user=%q", ErrUserMissingPasswordEnv, u.Username)
 		}
 	}
+
+	// tiers must be higher → lower order
+	for i := 1; i < len(f.Tiers); i++ {
+		if f.Tiers[i].Weight > f.Tiers[i-1].Weight {
+			return fmt.Errorf("%w: tier %q has higher weight than %q but comes after it",
+				ErrTiersNotOrdered, f.Tiers[i].Name, f.Tiers[i-1].Name)
+		}
+	}
+
 	return nil
 }
