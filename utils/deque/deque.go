@@ -9,7 +9,7 @@ var errDequeFull = errors.New("catfish/deque: deque full, rejecting item")
 // so a 1/3-rd of the baseline is okay in the queue
 // anyway it's configurable by the yaml settings
 const (
-	CAPACITY = 32
+	CAPACITY = 200
 )
 
 // Deque is a double-ended queue, allowing push and pop to both the front and back of the queue.

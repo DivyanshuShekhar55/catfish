@@ -73,13 +73,13 @@ func newCoDelWaiter[T any](enqueTime time.Time, payload T) *coDelWaiter[T] {
 	}
 }
 
-func NewCoDel[T any](shortTimeout, longTimeout time.Duration) *coDel[T] {
+func NewCoDel[T any](shortTimeout, longTimeout time.Duration, queueSize int) *coDel[T] {
 	return &coDel[T]{
 		shortTimeout: shortTimeout,
 		longTimeout:  longTimeout,
 		lastEmptied:  time.Now(),
 		mode:         0,
-		items:        deque.New[*coDelWaiter[T]](32),
+		items:        deque.New[*coDelWaiter[T]](queueSize),
 	}
 }
 

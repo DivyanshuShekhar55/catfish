@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"sync"
 	"time"
+
+	"github.com/DivyanshuShekhar55/catfish/config"
 )
 
 // Semaphore is a way to bound concurrency and similar to golang.org/x/sync/semaphore. Conceptually,
@@ -121,7 +123,8 @@ func SemaphoreDebtForgivePerSuccess(x float64) SemaphoreOption {
 // NewSemaphore returns a semaphore with the given number of priorities, and will allow at most
 // capacity concurrency.
 // The other options do not frequently need to be modified.
-func NewSemaphore(prioritiesCount int, capacity int, options ...SemaphoreOption) *Semaphore {
+// capacity is the max available token
+func NewSemaphore(tiers []config.Tier, capacity int, options ...SemaphoreOption) *Semaphore {
 	if capacity < 0 {
 		panic(ErrCapacityNegative)
 	}
@@ -136,6 +139,10 @@ func NewSemaphore(prioritiesCount int, capacity int, options ...SemaphoreOption)
 	}
 
 	now := time.Now()
+
+	// from the config get num of queues and size per queue
+	// pass the queueSizes[i] to make the new deque
+	prioritiesCount := len(tiers)
 
 	// we don't init a mutex as by default it gets a 0 value
 	s := &Semaphore{
@@ -155,8 +162,8 @@ func NewSemaphore(prioritiesCount int, capacity int, options ...SemaphoreOption)
 	// in original implementation, this is done in the Acquire function
 
 	// init the codels and debt struct values (currently all set as default zero values)
-	for i := range s.queues {
-		s.queues[i] = NewCoDel[int](opts.shortTimeout, opts.longTimeout)
+	for i, tier := range tiers {
+		s.queues[i] = NewCoDel[int](opts.shortTimeout, opts.longTimeout, tier.QueueSize)
 		s.debt[i] = linearDecay{
 			last: now,
 			max:  float64(capacity), // can't have more seats reserved than there is capacity
