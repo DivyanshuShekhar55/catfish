@@ -2,7 +2,6 @@ package backpressure
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -55,14 +54,7 @@ background goroutine
   └── fires every longTimeout → calls admit() → reap catches stale waiters
 */
 
-var (
-	ErrCapacityNil            error = errors.New("catfish/backpressure : semaphore has 0 capacity")
-	ErrCapacityNegative       error = errors.New("catfish/backpressure : semaphore has negative capacity")
-	ErrSemaphoreAlreadyCLosed error = errors.New("catfish/backpressure : semaphore has already closed")
-	ErrSemaphoreUnbalance     error = errors.New("catfish/backpressure : unbalanced acquire and release in semaphores")
-
-	infinity time.Duration = 365 * 24 * time.Hour
-)
+var infinity time.Duration = 365 * 24 * time.Hour
 
 type Semaphore struct {
 	m                     sync.Mutex    // the single lock protecting everything
@@ -198,16 +190,12 @@ func (s *Semaphore) Acquire(ctx context.Context, tokenDemand int, targetPriority
 	// Guard clause against dirty input indices
 	if targetPriority < 0 || targetPriority >= len(s.queues) {
 		s.m.Unlock()
-		return fmt.Errorf("invalid priority level %d", targetPriority)
+		return fmt.Errorf("%w: %d", ErrInvalidPriorityLevel, targetPriority)
 	}
 
 	if tokenDemand > s.capacity {
 		s.m.Unlock()
-		return fmt.Errorf(
-			"tried to Acquire %d tokens, semaphore only has capacity for %d",
-			tokenDemand,
-			s.capacity,
-		)
+		return fmt.Errorf("%w: tried to Acquire %d tokens, semaphore only has capacity for %d", ErrTokenDemandTooLarge, tokenDemand, s.capacity)
 	}
 
 	now := time.Now()

@@ -2,7 +2,6 @@ package backpressure
 
 import (
 	"context"
-	"errors"
 	"sync/atomic"
 	"time"
 
@@ -31,8 +30,6 @@ const (
 	coDelModeFIFO coDelMode = iota
 	coDelModeLIFO
 )
-
-var ErrRejected error = errors.New("catfish/backpressure : request rejected, too many requests")
 
 // true if there are no waiters in the codel.
 func (c *coDel[T]) empty() bool {
@@ -198,7 +195,7 @@ func (c *coDel[T]) pop(now time.Time) (T, bool) {
 }
 
 // reap removes and wakes-unsuccessfully waiters that have timed out based on the current codelMode.
-// codel assumes this will be called at least once every longTimeout 
+// codel assumes this will be called at least once every longTimeout
 // this assumption leads to change the timeout in the reap function itself
 func (c *coDel[T]) reap(now time.Time) {
 	c.setMode(now)
