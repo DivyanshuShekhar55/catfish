@@ -12,10 +12,6 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-var (
-	ErrConnAcquire error = errors.New("catfish/pool : error acquiring a connection from the pool")
-)
-
 type Config struct {
 	DSN                 string
 	minConns            int32
@@ -54,7 +50,7 @@ func New(ctx context.Context, cfg Config) (*Pool, error) {
 	poolCfg, err := pgxpool.ParseConfig(cfg.DSN)
 
 	if err != nil {
-		return nil, fmt.Errorf("error with parsing connection string %w", err)
+		return nil, fmt.Errorf("%w: %w", ErrParseConnectionString, err)
 	}
 	poolCfg.MaxConns = cfg.maxConns
 	poolCfg.MinConns = cfg.minConns
@@ -90,7 +86,7 @@ func New(ctx context.Context, cfg Config) (*Pool, error) {
 
 	inner, err := pgxpool.NewWithConfig(ctx, poolCfg)
 	if err != nil {
-		return nil, fmt.Errorf("catfish/pool: create pool: %w", err)
+		return nil, fmt.Errorf("%w: %w", ErrCreatePool, err)
 	}
 
 	p := &Pool{inner: inner, config: cfg}
@@ -98,7 +94,7 @@ func New(ctx context.Context, cfg Config) (*Pool, error) {
 	// Warm the pool: block until MinConns idle connections are established.
 	if err := p.warm(ctx); err != nil {
 		inner.Close()
-		return nil, fmt.Errorf("catfish/pool: warming: %w", err)
+		return nil, fmt.Errorf("%w: %w", ErrWarmPool, err)
 	}
 
 	return p, nil
@@ -119,13 +115,13 @@ func (p *Pool) Close() {
 func (p *Pool) Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
 	conn, err := p.inner.Acquire(ctx)
 	if err != nil {
-		return pgconn.CommandTag{}, fmt.Errorf("catfish/pool: acquire: %w", err)
+		return pgconn.CommandTag{}, fmt.Errorf("%w: %w", ErrAcquireConn, err)
 	}
 	defer conn.Release()
 
 	cmdTag, err := conn.Exec(ctx, sql, args...)
 	if err != nil {
-		return pgconn.CommandTag{}, fmt.Errorf("catfish/pool: exec: %w", err)
+		return pgconn.CommandTag{}, fmt.Errorf("%w: %w", ErrExecConn, err)
 	}
 	return cmdTag, nil
 }
@@ -143,7 +139,7 @@ func (p *Pool) Exec(ctx context.Context, sql string, args ...any) (pgconn.Comman
 func (p *Pool) Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error) {
 	conn, err := p.inner.Acquire(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("catfish/pool: acquire: %w", err)
+		return nil, fmt.Errorf("%w: %w", ErrAcquireConn, err)
 	}
 	// we do NOT write defer conn.Release() due to reason mentioned before
 	// rows is not the data, just a handler to get the data
@@ -151,7 +147,7 @@ func (p *Pool) Query(ctx context.Context, sql string, args ...any) (pgx.Rows, er
 	if err != nil {
 		// if error call conn.Release()
 		conn.Release()
-		return nil, fmt.Errorf("catfish/pool: query: %w", err)
+		return nil, fmt.Errorf("%w: %w", ErrQueryConn, err)
 	}
 
 	// clever part : (thanks to Claude) now we can hijack the real rows here
@@ -169,7 +165,7 @@ func (p *Pool) QueryRow(ctx context.Context, sql string, args ...any) pgx.Row {
 	conn, err := p.inner.Acquire(ctx)
 	if err != nil {
 		// pgx.Row surfaces the error on .Scan(), so wrap it there
-		return &errRow{err: fmt.Errorf("catfish/pool: acquire: %w", err)}
+		return &errRow{err: fmt.Errorf("%w: %w", ErrAcquireRow, err)}
 	}
 
 	row := conn.QueryRow(ctx, sql, args...)
@@ -187,13 +183,13 @@ func (p *Pool) QueryRow(ctx context.Context, sql string, args ...any) pgx.Row {
 func (p *Pool) BeginTx(ctx context.Context, opts pgx.TxOptions) (pgx.Tx, error) {
 	conn, err := p.inner.Acquire(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("catfish/pool: acquire: %w", err)
+		return nil, fmt.Errorf("%w: %w", ErrAcquireConn, err)
 	}
 
 	tx, err := conn.BeginTx(ctx, opts)
 	if err != nil {
 		conn.Release()
-		return nil, fmt.Errorf("catfish/pool: begin tx: %w", err)
+		return nil, fmt.Errorf("%w: %w", ErrBeginTxConn, err)
 	}
 
 	// Wrap so we release the connection after commit or rollback.
@@ -245,7 +241,7 @@ func (p *Pool) ParameterStatuses(ctx context.Context) (map[string]string, error)
 func (p *Pool) WithConn(ctx context.Context, fn func(net.Conn) error) error {
 	conn, err := p.inner.Acquire(ctx)
 	if err != nil {
-		return fmt.Errorf("catfish/pool : acquire error :%w", err)
+		return fmt.Errorf("%w: %w", ErrWithConnAcquire, err)
 	}
 	defer conn.Release()
 
@@ -266,7 +262,7 @@ func (p *Pool) warm(ctx context.Context) error {
 	for {
 		select {
 		case <-ctx.Done():
-			return fmt.Errorf("context cancelled while warming pool: %w", ctx.Err())
+			return fmt.Errorf("%w: %w", ErrWarmCancelled, ctx.Err())
 		case <-ticker.C:
 			stat := p.inner.Stat()
 			if stat.IdleConns() >= p.config.minConns {
@@ -290,7 +286,7 @@ func rollbackIfNeeded(ctx context.Context, conn *pgx.Conn) error {
 	// try to rollback
 	_, err := conn.Exec(ctx, "ROLLBACK")
 	if err != nil {
-		return fmt.Errorf("error rolling back conn after release %w", err)
+		return fmt.Errorf("%w: %w", ErrRollbackAfterRelease, err)
 	}
 	return nil
 }
@@ -301,7 +297,7 @@ func drainRows(ctx context.Context, conn *pgx.Conn, maxDrainRows int32) (bool, e
 	// send false to delete connection, send true to keep it alive
 	rows, err := conn.Query(ctx, "SELECT 1 WHERE FALSE")
 	if err != nil {
-		return false, fmt.Errorf("error during row drain probe %w", err)
+		return false, fmt.Errorf("%w: %w", ErrDrainRowsProbe, err)
 	}
 	defer rows.Close()
 
@@ -380,7 +376,7 @@ type autoReleaseTx struct {
 // user called Commit after tx, release the connection
 func (t *autoReleaseTx) Commit(ctx context.Context) error {
 	if t.done {
-		return fmt.Errorf("catfish/pool: tx already closed")
+		return ErrTxAlreadyClosed
 	}
 	t.done = true
 	err := t.Tx.Commit(ctx)

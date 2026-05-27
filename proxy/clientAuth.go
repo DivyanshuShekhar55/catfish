@@ -382,7 +382,7 @@ func authSCRAM(backend *pgproto3.Backend, entry config.User) error {
 func parseClientFirst(msg string) (string, string, error) {
 	// Strip GS2 header "n,,"
 	if !strings.HasPrefix(msg, "n,,") {
-		return "", "", fmt.Errorf("expected GS2 header 'n,,', got %q", msg[:min(6, len(msg))])
+		return "", "", fmt.Errorf("%w: got %q", ErrScramExpectedGS2Header, msg[:min(6, len(msg))])
 	}
 	bare := msg[3:] // "n=username,r=clientNonce"
 
@@ -394,7 +394,7 @@ func parseClientFirst(msg string) (string, string, error) {
 	}
 
 	if clientNonce == "" {
-		return "", "", fmt.Errorf("no client nonce in client-first-message")
+		return "", "", ErrScramNoClientNonce
 	}
 
 	return bare, clientNonce, nil
@@ -406,7 +406,7 @@ func parseClientFirst(msg string) (string, string, error) {
 func parseClientFinal(msg, expectedNonce string) (string, string, error) {
 	parts := strings.Split(msg, ",")
 	if len(parts) < 3 {
-		return "", "", fmt.Errorf("malformed client-final-message")
+		return "", "", ErrScramMalformedClientFinal
 	}
 
 	var proof string
@@ -420,14 +420,14 @@ func parseClientFinal(msg, expectedNonce string) (string, string, error) {
 			if strings.HasPrefix(part, "r=") {
 				nonce := part[2:]
 				if nonce != expectedNonce {
-					return "", "", fmt.Errorf("nonce mismatch: expected %q got %q", expectedNonce, nonce)
+					return "", "", fmt.Errorf("%w: expected %q got %q", ErrScramNonceMismatch, expectedNonce, nonce)
 				}
 			}
 		}
 	}
 
 	if proof == "" {
-		return "", "", fmt.Errorf("no proof in client-final-message")
+		return "", "", ErrScramNoProof
 	}
 
 	return strings.Join(withoutProof, ","), proof, nil
