@@ -1,10 +1,5 @@
 package deque
 
-import "errors"
-
-var errDequeEmpty = errors.New("catfish/deque: cannot pop from empty queue")
-var errDequeFull = errors.New("catfish/deque: deque full, rejecting item")
-
 // i guess a few 100 conns per app is usually setup in a connection pooler
 // so a 1/3-rd of the baseline is okay in the queue
 // anyway it's configurable by the yaml settings
@@ -28,7 +23,7 @@ type Deque[T any] struct {
 
 func New[T any](capacity int) *Deque[T] {
 	if capacity <= 0 {
-		panic("catfish/deque : capacity must be greater than 0")
+		panic(errDequeCapacityInvalid)
 	}
 	return &Deque[T]{
 		a:           make([]T, capacity),

@@ -67,12 +67,12 @@ func Load(path string) (*Config, error) {
 	// as file won't be too big, read it fully
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("catfish/config : read %s: %w", path, err)
+		return nil, fmt.Errorf("%w: path=%s: %w", ErrReadConfigFile, path, err)
 	}
 
 	var f File
 	if err := yaml.Unmarshal(data, &f); err != nil {
-		return nil, fmt.Errorf("catfish/config : parse error %s: %w", path, err)
+		return nil, fmt.Errorf("%w: path=%s: %w", ErrParseConfigFile, path, err)
 	}
 
 	if err := validate(&f); err != nil {
@@ -121,7 +121,7 @@ func Load(path string) (*Config, error) {
 	// loop over users, check if their tier is valid, verify password exists, get it
 	for _, u := range f.Users {
 		if !tierNames[u.Tier] {
-			return nil, fmt.Errorf("config: user %q references unknown tier %q", u.Username, u.Tier)
+			return nil, fmt.Errorf("%w: user=%q tier=%q", ErrUnknownTier, u.Username, u.Tier)
 		}
 
 		// TODO : check if this is actually safe
@@ -129,10 +129,7 @@ func Load(path string) (*Config, error) {
 		// or any other likely issue
 		password := os.Getenv(u.PasswordEnv)
 		if password == "" {
-			return nil, fmt.Errorf(
-				"config: password env var %q for user %q is not set or empty",
-				u.PasswordEnv, u.Username,
-			)
+			return nil, fmt.Errorf("%w: env=%q user=%q", ErrPasswordEnvMissing, u.PasswordEnv, u.Username)
 		}
 
 		cfg.Users = append(cfg.Users, User{
@@ -150,17 +147,17 @@ func Load(path string) (*Config, error) {
 
 func validate(f *File) error {
 	if f.PostgresHost == "" {
-		return fmt.Errorf("config: postgres_host is required")
+		return ErrPostgresHostRequired
 	}
 	if len(f.Tiers) == 0 {
-		return fmt.Errorf("config: at least one tier is required")
+		return ErrAtLeastOneTierRequired
 	}
 	if len(f.Users) == 0 {
-		return fmt.Errorf("config: at least one user is required")
+		return ErrAtLeastOneUserRequired
 	}
 	for _, u := range f.Users {
 		if u.PasswordEnv == "" {
-			return fmt.Errorf("config: user %q is missing password_env", u.Username)
+			return fmt.Errorf("%w: user=%q", ErrUserMissingPasswordEnv, u.Username)
 		}
 	}
 	return nil
