@@ -323,33 +323,53 @@ func (s *CatfishServer) clientLoop(
 
 		default:
 			// extended query protocol (Parse/Bind/Execute) or anything else
-			// we don't inspect — forward blindly and relay whatever postgres says back
 			// client sends multiple queries to pg
 			// then pg sends multiple to client
-			// first dump all app's msg with a loop, break when Sync point occurs
+			// first try to get a token from semaphore
+			// then dump all app's msg with a loop, break when Sync point occurs
+			targetPriority, ok := s.tierIndex[clientState.tier]
+			if !ok {
+				targetPriority = len(s.tierIndex) - 1
+			}
+
+			if err := s.semaphore.Acquire(ctx, 1, targetPriority); err != nil {
+				sendError(backend, ErrCodeTooBusy, "catfish: too busy, try again later")
+				sendReadyForQuery(backend, clientState.txStatus)
+				return
+			}
+			defer s.semaphore.Release(1)
+
+			clientState.queryInProgress = true
+
+			// forward all messages from app until Sync (end of extended sequence)
 			for {
-
-				if frontendMsg, ok := msg.(pgproto3.FrontendMessage); ok {
-					// keep buffering until finished
-					frontend.Send(frontendMsg)
+				if fm, ok := msg.(pgproto3.FrontendMessage); ok {
+					frontend.Send(fm)
 				}
 
-				if _, ok := msg.(*pgproto3.Sync); ok {
-					frontend.Flush() // now flush everything at once
-					break            // PG will now respond
-				}
-
+				// Flush is a hint to send buffered data but doesn't end the sequence
 				if _, ok := msg.(*pgproto3.Flush); ok {
 					frontend.Flush()
-					// don't break — Flush doesn't end the sequence, Sync does
 				}
 
-				// keep reading from app until we see Sync
+				// Sync ends the extended sequence — flush everything and wait for pg
+				if _, ok := msg.(*pgproto3.Sync); ok {
+					if err := frontend.Flush(); err != nil {
+						sendError(backend, ErrCodeConnFailed, ErrQueryForward.Error()+": "+err.Error())
+						clientState.queryInProgress = false
+						return
+					}
+					break
+				}
+
+				// read next message from app
 				msg, err = backend.Receive()
 				if err != nil {
+					clientState.queryInProgress = false
 					return
 				}
 			}
+
 			// Postgres sends back multiple response messages for each of those frontend.Send() — and you need to forward ALL of them back to the app
 			// relay response back to frontend until ReadyForQuery msg pops up
 			if err := s.relayUntilReady(backend, frontend, clientState); err != nil {
