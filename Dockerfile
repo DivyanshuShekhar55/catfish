@@ -15,6 +15,11 @@ FROM alpine:3.20
 
 WORKDIR /app
 
+# create non-root user
+RUN adduser -D -g '' catfish
+# switch to it
+USER catfish
+
 COPY --from=builder /app/catfish .
 
 EXPOSE 6432
