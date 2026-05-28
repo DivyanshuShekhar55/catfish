@@ -1,0 +1,35 @@
+listen: ":6432"
+postgres_host: "postgres"   # matches the docker-compose service name
+postgres_port: 5432
+shutdown_timeout: 10s
+max_concurrent: 20
+
+pool:
+  min_conns: 2
+  max_conns: 10
+  max_conn_time: 1h
+  max_idle_time: 20m
+
+tiers:
+  - name: critical
+    weight: 3
+    queue_size: 100
+  - name: normal
+    weight: 2
+    queue_size: 100
+  - name: low
+    weight: 1
+    queue_size: 50
+
+users:
+  - username: admin_user
+    database: products
+    tier: critical
+    password_env: CATFISH_ADMIN_PASSWORD
+    auth_method: md5
+
+  - username: analytics_user
+    database: products
+    tier: normal
+    password_env: CATFISH_ANALYTICS_PASSWORD
+    auth_method: md5

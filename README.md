@@ -25,7 +25,7 @@ PgBouncer is great. Seriously — use it for most things. But it has a few blind
 
 Catfish is a proxy server that sits between your app and Postgres. It assigns connections based on *priority tiers* with configurable weights — so your critical queries always get served before the low-priority ones. Each client is handled in its own goroutine, overcoming the single-threaded bottleneck. And when things are busy, queries that do wait are managed by a **CoDel (Controlled Delay)**-based queue that prevents buffer bloat and keeps latency predictable.
 
-The design is heavily inspired by PGKeeper, an internal tool built at Figma. You can read about the implementation in [this blog post](#) and the original PGKeeper writeup [here](#).
+The design is heavily inspired by PGKeeper, an internal tool built at Figma. You can read about the implementation in [this blog post](#) and the original PGKeeper writeup [here](#https://www.figma.com/blog/pgkeeper-building-the-bouncer-we-needed-for-postgres/).
 
 <p align="center">
   <img src="./docs/overview.png" height=320>
@@ -272,7 +272,7 @@ catfish/
 
 - [PGKeeper blog post by Figma](https://www.figma.com/blog/postgres-connection-pooling/) — the primary design inspiration
 - [jackc/pgx](https://github.com/jackc/pgx) — the Postgres driver and protocol library underlying everything
-- The `backpressure` package whose implementation helped inform the semaphore and CoDel design
+- The `bradenaw/backpressure` package whose implementation helped inform the semaphore and CoDel design
 
 ---
 

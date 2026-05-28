@@ -27,6 +27,14 @@ go.work.sum
 # env file
 .env
 
+# Local development files
+init.sql
+examples/basic/main.go
+
 # Editor/IDE
 # .idea/
 # .vscode/
+
+docker-compose.yml
+
+
