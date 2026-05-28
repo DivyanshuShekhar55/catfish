@@ -115,9 +115,9 @@ func (cw *coDelWaiter[T]) wait(ctx context.Context) error {
 }
 
 // admit will attempt to admit the request, returns true if admission successfull
-func (wc *coDelWaiter[T]) admit() bool {
-	isAdmitted := atomic.CompareAndSwapUint32(&wc.state, 0, 1)
-	wc.c <- true
+func (cw *coDelWaiter[T]) admit() bool {
+	isAdmitted := atomic.CompareAndSwapUint32(&cw.state, 0, 1)
+	cw.c <- true
 	return isAdmitted
 }
 

@@ -53,7 +53,6 @@ func New(ctx context.Context, cfg *config.Config, semaphore *backpressure.Semaph
 		)
 
 		// create a new pool for this (user, db) pair
-		// TODO : set other parts of pool.Config too here
 		p, err := pool.New(ctx, pool.Config{
 			DSN: dsn,
 			MaxConns: cfg.Pool.MaxConns,

@@ -256,7 +256,7 @@ func (s *Semaphore) Acquire(ctx context.Context, tokenDemand int, targetPriority
 	}
 
 	// original implementation has a check for nil s.bgDone but we did that in New itself
-	// THINK : can it casue troubles?
+	// TODO : can it casue troubles?
 	s.admit(now)
 	s.m.Unlock()
 

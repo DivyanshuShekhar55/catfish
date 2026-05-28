@@ -1,8 +1,6 @@
 package deque
 
-// i guess a few 100 conns per app is usually setup in a connection pooler
-// so a 1/3-rd of the baseline is okay in the queue
-// anyway it's configurable by the yaml settings
+// anyway the capcity configurable by the yaml settings
 const (
 	CAPACITY = 200
 )
