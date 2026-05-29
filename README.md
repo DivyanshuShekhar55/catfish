@@ -25,7 +25,7 @@ PgBouncer is great. Seriously — use it for most things. But it has a few blind
 
 Catfish is a proxy server that sits between your app and Postgres. It assigns connections based on *priority tiers* with configurable weights — so your critical queries always get served before the low-priority ones. Each client is handled in its own goroutine, overcoming the single-threaded bottleneck. And when things are busy, queries that do wait are managed by a **CoDel (Controlled Delay)**-based queue that prevents buffer bloat and keeps latency predictable.
 
-The design is heavily inspired by PGKeeper, an internal tool built at Figma. You can read about the implementation in [this blog post](#) and the original PGKeeper writeup [here](#https://www.figma.com/blog/pgkeeper-building-the-bouncer-we-needed-for-postgres/).
+The design is heavily inspired by PGKeeper, an internal tool built at Figma. You can read about the implementation in [this blog post](https://medium.com/@shekdivyanshu/the-little-catfish-2618d395cbd2) and the original PGKeeper writeup [here](https://www.figma.com/blog/pgkeeper-building-the-bouncer-we-needed-for-postgres/).
 
 <p align="center">
   <img src="./docs/overview.png" height=320>
@@ -210,6 +210,7 @@ If an env var is missing at startup, catfish fails on purpose. No silent default
 - **Unknown users are rejected.** If a client connects with a username/database pair not in your config, it gets an auth error. No fallthrough.
 - **No support for `transaction` and `statement` pooling modes.**
 - **All queries carry equal weight.** Each query occupies exactly one concurrency token regardless of query complexity. A future improvement could use a lightweight model to assign per-query weights.
+- **Haven't yet thought about some password safety concerns**
 
 ---
 
@@ -278,7 +279,7 @@ catfish/
 
 ## Contributing
 
-PRs and issues are welcome. If something's broken or the docs are confusing, open an issue. SSL support and a metrics endpoint are the two areas most in need of help.
+PRs and issues are welcome. If something's broken or the docs are confusing, open an issue. SSL support, metrics endpoint, safe password handling in memory are the three areas most in need of help.
 
 ```bash
 git clone https://github.com/DivyanshuShekhar55/catfish
